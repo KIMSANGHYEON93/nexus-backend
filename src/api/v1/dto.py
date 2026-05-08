@@ -7,9 +7,8 @@ this is the one place to bump a v2 router with new DTOs and keep v1
 responding the old shape.
 """
 
-from __future__ import annotations
-
 from datetime import datetime
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,13 +31,29 @@ class EdgeDTO(BaseModel):
 class SnapshotDTO(BaseModel):
     entities: list[EntityDTO]
     edges: list[EdgeDTO]
-    ts: datetime | None = None
+    ts: Optional[datetime] = None
+
+
+class MigrationStatusDTO(BaseModel):
+    """Migration application state, reported on every /readyz call.
+
+    `applied` is null when the schema_version table itself is missing —
+    distinguishes 'fresh DB, no migrations ever ran' from 'partial run'.
+    `reason` carries operator guidance when ok=False (e.g. 'run db/migrate.py').
+    """
+
+    applied:  Optional[int]
+    expected: int
+    ok:       bool
+    reason:   Optional[str] = None
 
 
 class ReadinessDTO(BaseModel):
     """Detailed readiness — booleans per dependency so liveness probes can
-    distinguish 'app is up but DB is down' from 'app is dead'."""
+    distinguish 'app is up but DB is down' from 'app is dead', and a stale
+    container (code newer than the migrated schema) from a healthy one."""
 
-    ok: bool
-    database: bool
-    redis: bool
+    ok:        bool
+    database:  bool
+    redis:     bool
+    migration: MigrationStatusDTO

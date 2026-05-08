@@ -15,9 +15,13 @@ from fastapi import APIRouter, Depends
 
 from ...core.security import Principal, get_current_user, require_principal
 from ...domain.market.repository import MarketRepository
-from ...infrastructure.database import get_pool
+from ...infrastructure.database import (
+    EXPECTED_SCHEMA_VERSION,
+    get_pool,
+    verify_schema,
+)
 from ...infrastructure.redis_pubsub import get_client
-from .dto import EdgeDTO, EntityDTO, ReadinessDTO, SnapshotDTO
+from .dto import EdgeDTO, EntityDTO, MigrationStatusDTO, ReadinessDTO, SnapshotDTO
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +42,21 @@ async def health() -> dict:
 
 @router.get("/readyz", response_model=ReadinessDTO)
 async def readyz() -> ReadinessDTO:
-    """Readiness probe — pings every external dependency. Returns 200 with
-    booleans so a load balancer can read partial degradation; the service
-    self-reports `ok` only when every component answered."""
+    """Readiness probe — pings every external dependency AND verifies the
+    DB schema version. Returns 200 with granular booleans so a load
+    balancer / Kubernetes probe / operator dashboard can distinguish
+    'app is up but DB is down' from 'app is up, DB is up, but the
+    container's code is newer than the applied migrations.'
+
+    The service self-reports `ok=true` only when DB ping AND Redis ping
+    AND schema version are all green.
+    """
     db_ok = False
     redis_ok = False
+    pool = get_pool()
+
     try:
-        async with get_pool().acquire() as conn:
+        async with pool.acquire() as conn:
             await conn.execute("SELECT 1")
         db_ok = True
     except Exception:  # noqa: BLE001
@@ -56,7 +68,24 @@ async def readyz() -> ReadinessDTO:
     except Exception:  # noqa: BLE001
         logger.exception("readyz: redis ping failed")
 
-    return ReadinessDTO(ok=db_ok and redis_ok, database=db_ok, redis=redis_ok)
+    if db_ok:
+        check = await verify_schema(pool)
+        migration = MigrationStatusDTO(
+            applied=check.applied, expected=check.expected,
+            ok=check.ok, reason=check.reason,
+        )
+    else:
+        # Skip schema probe if DB ping failed — duplicate noise; surface
+        # the underlying connection failure instead.
+        migration = MigrationStatusDTO(
+            applied=None, expected=EXPECTED_SCHEMA_VERSION, ok=False,
+            reason="database unreachable — schema unknown",
+        )
+
+    return ReadinessDTO(
+        ok=db_ok and redis_ok and migration.ok,
+        database=db_ok, redis=redis_ok, migration=migration,
+    )
 
 
 @router.get("/me")

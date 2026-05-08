@@ -25,7 +25,7 @@ from .core.config import get_settings
 from .core.exception_handlers import install as install_exception_handlers
 from .core.logging import configure_logging
 from .core.middleware import RequestIdMiddleware
-from .infrastructure.database import close_pool, init_pool
+from .infrastructure.database import close_pool, init_pool, verify_schema
 from .infrastructure.redis_pubsub import close_client, init_client
 
 
@@ -46,9 +46,32 @@ async def lifespan(app: FastAPI):
         extra={"env": settings.app_env, "log_level": settings.log_level},
     )
 
-    await init_pool(settings)
+    pool = await init_pool(settings)
     await init_client(settings)
     logger.info("infrastructure ready")
+
+    # Schema verification is non-blocking by design: a stale container
+    # boots, /readyz reports the problem, an operator runs db/migrate.py
+    # and the next probe goes green — no restart needed. Crashing here
+    # would force restart loops in Kubernetes during a partial deploy.
+    try:
+        check = await verify_schema(pool)
+        if not check.ok:
+            logger.error(
+                "startup: schema verification failed — service will report "
+                "NOT READY on /v1/readyz until migrations are applied",
+                extra={
+                    "event": "startup_schema_stale",
+                    "applied": check.applied,
+                    "expected": check.expected,
+                    "reason": check.reason,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "startup: schema verification raised unexpectedly",
+            extra={"event": "startup_schema_error"},
+        )
 
     try:
         yield
