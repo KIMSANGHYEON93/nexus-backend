@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  # 1. API 서버 (Python FastAPI)
+  api:
+    build: .
+    container_name: nexus_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src  # 코드를 수정하면 컨테이너 재시작 없이 즉시 반영(Hot-reload)
+    environment:
+      - DATABASE_URL=postgresql://nexus_admin:strongpassword123@timescaledb:5432/nexus_os
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      - timescaledb
+      - redis
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 2. 시계열 데이터베이스 (TimescaleDB)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: nexus_timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=nexus_admin
+      - POSTGRES_PASSWORD=strongpassword123
+      - POSTGRES_DB=nexus_os
+    volumes:
+      - pgdata:/var/lib/postgresql/data # 컨테이너가 꺼져도 데이터 영구 보존
+
+  # 3. 실시간 Pub/Sub 브로커 (Redis)
+  redis:
+    image: redis:alpine
+    container_name: nexus_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+# 볼륨 정의 (데이터 영속성)
+volumes:
+  pgdata:
+  redisdata:

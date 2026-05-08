@@ -1,0 +1,65 @@
+name: backend CI
+
+# Runs on every push to main and on every pull request. The three jobs
+# fan out so a slow Docker build doesn't gate fast pytest feedback.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Fast feedback: 22 unit tests + 6 dep-gated integration tests ──────
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev deps
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: pytest
+        # Strict: any deprecation warning fails. See pyproject.toml for filters.
+        run: pytest -v --tb=short
+
+  # ── Compose schema check — catches docker-compose.yml drift ───────────
+  compose-validate:
+    name: compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config
+        run: docker compose config --quiet
+
+  # ── Image build — smoke test the Dockerfile (no push, no run) ─────────
+  image-build:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: nexus-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

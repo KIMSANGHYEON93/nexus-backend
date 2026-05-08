@@ -1,0 +1,20 @@
+# Project meta + tooling config. Runtime deps remain in requirements.txt
+# so the Dockerfile build step (`pip install -r requirements.txt`) keeps
+# its tight, no-extras footprint.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"          # any `async def test_*` is auto-marked
+addopts = [
+    "-ra",                     # short summary of failures + skips
+    "--strict-markers",
+    "--tb=short",
+]
+filterwarnings = [
+    "error",                   # fail on warnings — surface deprecations early
+    # asyncio's ProactorEventLoop on Windows logs a benign DEBUG line during
+    # event-loop close in Python 3.13+; ignore it so tests don't flake on Win.
+    "ignore::ResourceWarning",
+]

@@ -1,0 +1,7 @@
+# Test + dev tooling. Runtime deps stay in requirements.txt; this file
+# is only installed in CI and local dev images: `pip install -r requirements-dev.txt`.
+
+-r requirements.txt
+
+pytest==8.4.2
+pytest-asyncio==1.3.0
