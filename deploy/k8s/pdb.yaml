@@ -1,0 +1,51 @@
+# PodDisruptionBudget — guarantees a minimum healthy pod count during
+# VOLUNTARY disruptions (node drains, cluster upgrades, autoscaler
+# evictions). Hard kills (OOM, node failure) are involuntary and PDB
+# does not apply.
+#
+# Two PDBs in this file:
+#   • nexus-api    — minAvailable 1 means a `kubectl drain` won't take
+#     both replicas down at once. Combined with the Deployment's
+#     RollingUpdate (maxUnavailable: 0), the API tier never drops to
+#     zero capacity during a node rotation.
+#   • timescaledb  — single replica, but PDB still useful: it BLOCKS a
+#     drain that would take the only DB pod down. The operator must
+#     explicitly add a read replica or scale the DB down to 0 first.
+#     This prevents an absent-minded drain from causing a 60-second
+#     write outage.
+#
+# We do NOT define a PDB for redis because:
+#   1. It has 1 replica (so PDB minAvailable: 1 would block all drains).
+#   2. The pub/sub channel is ephemeral — subscribers reconnect cleanly,
+#      a 5-second eviction window is acceptable.
+
+# ── nexus-api ──────────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nexus-api
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-api
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-api
+
+---
+# ── timescaledb ────────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: timescaledb
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb

@@ -40,6 +40,9 @@ to any Kubernetes cluster (kind, minikube, AKS, GKE, EKS — agnostic).
 | `redis-deployment.yaml`       | Single-replica Redis 7. No persistence — pub/sub is ephemeral. |
 | `api-deployment.yaml`         | FastAPI app, 2 replicas, three probes (startup / liveness / readiness). |
 | `services.yaml`               | One ClusterIP per workload + headless service for the StatefulSet. |
+| `hpa.yaml`                    | HorizontalPodAutoscaler — scales nexus-api 2..10 on CPU 70% / Mem 80%. |
+| `pdb.yaml`                    | PodDisruptionBudget for nexus-api + timescaledb (minAvailable: 1). |
+| `networkpolicy.yaml`          | Default-deny ingress + selective allows (api↔db, api↔redis, ingress→api). |
 
 ## First-time deployment (operator playbook)
 
@@ -127,7 +130,18 @@ kubectl -n nexus-os rollout status statefulset/timescaledb
 
 kubectl apply -f api-deployment.yaml
 kubectl -n nexus-os rollout status deployment/nexus-api
+
+# Policy resources — apply LAST so workloads exist for the selectors
+# to bind to. Order within this group does not matter.
+kubectl apply -f hpa.yaml             # autoscale 2..10 on CPU/Mem
+kubectl apply -f pdb.yaml             # minAvailable: 1 during drains
+kubectl apply -f networkpolicy.yaml   # default-deny + selective allows
 ```
+
+**Cluster prerequisites for the policy resources:**
+- `hpa.yaml` requires a metrics-server (`kubectl top pod` must work).
+- `networkpolicy.yaml` requires a CNI that enforces NetworkPolicy
+  (Calico, Cilium, Antrea — NOT default kindnet).
 
 ### 4. Apply the database schema + seed (one-time)
 

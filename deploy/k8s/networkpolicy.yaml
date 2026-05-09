@@ -1,0 +1,158 @@
+# NetworkPolicy — zero-trust networking inside the nexus-os namespace.
+#
+# Default Kubernetes networking is "all pods can reach all pods on all
+# ports". For a stack that handles financial data + bearer tokens that
+# is the wrong default. This file flips it: every pod gets a deny-all
+# policy by default, then selective allows are added per workload.
+#
+# Prerequisite: the cluster's CNI plugin must enforce NetworkPolicy.
+# Calico, Cilium, Antrea, AWS VPC CNI (with calico add-on) all do.
+# The default kindnet on `kind` does NOT — install Calico for testing.
+#
+# Five policies in this file (one per workload + the default-deny):
+#   1. default-deny-ingress   — every pod blocks all ingress.
+#   2. allow-ingress-to-api   — only the cluster's ingress-nginx /
+#                                 gateway controller can reach :8000.
+#   3. allow-api-to-postgres  — only nexus-api pods can reach :5432.
+#   4. allow-api-to-redis     — only nexus-api pods can reach :6379.
+#   5. allow-dns              — every pod gets DNS, otherwise nothing
+#                                 resolves and even the in-cluster
+#                                 svc/timescaledb name lookup fails.
+
+# ── 1. Default deny-all ingress for the namespace ──────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  podSelector: {}                  # matches every pod in nexus-os
+  policyTypes:
+    - Ingress
+  # No `ingress:` rules means "allow nothing". Egress is unrestricted by
+  # default; add an `Egress` policyType to lock that down too if your
+  # threat model requires it.
+
+---
+# ── 2. Allow ingress controllers to reach the API on :8000 ─────────────
+# Most clusters install ingress-nginx in `ingress-nginx` namespace OR
+# istio-ingress in `istio-system`. We accept either. Customize the
+# namespaceSelector to match your specific ingress installation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-api
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-api
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# ── 3. Allow nexus-api pods to reach TimescaleDB on :5432 ──────────────
+# Even another compromised pod in nexus-os (say a future cron-jobber)
+# can't talk to Postgres unless it carries the nexus-api label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-postgres
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus-api
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# ── 4. Allow nexus-api pods to reach Redis on :6379 ────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-redis
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus-api
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# ── 5. Allow DNS — kube-dns / CoreDNS for service discovery ────────────
+# Without this, pods can't resolve `timescaledb.nexus-os.svc.cluster.local`
+# and the API's asyncpg.connect() blows up at startup.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  podSelector: {}                  # every pod in nexus-os
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Also allow egress within the namespace itself so api → db / redis
+    # works. Same-namespace egress is what the deny-ingress rule above
+    # protects via the Ingress side.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: nexus-os

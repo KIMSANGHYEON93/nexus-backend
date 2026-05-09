@@ -1,0 +1,77 @@
+# HorizontalPodAutoscaler — autoscale the API tier on CPU + memory.
+#
+# ONLY the api Deployment is autoscaled. timescaledb and redis are
+# explicitly excluded:
+#   • timescaledb is a StatefulSet with persistent storage; horizontal
+#     scale needs Patroni or read-replica plumbing — out of scope.
+#   • redis pub/sub does not fan out across non-clustered replicas;
+#     scaling its Deployment would split-brain subscribers.
+#
+# Prerequisite: the cluster must have a metrics-server installed
+# (`kubectl top pod` should work). Without it, HPA's `type: Resource`
+# probes can't read CPU / memory and the autoscaler stays at minReplicas.
+# Most managed clusters (GKE, AKS, EKS) install metrics-server by default;
+# kind / minikube need a one-time `kubectl apply` of the components yaml.
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nexus-api
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-api
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind:       Deployment
+    name:       nexus-api
+
+  # Min/max bounds. minReplicas matches the Deployment's replicas: 2 so
+  # an HPA-driven downscale never drops below the no-zero-capacity floor
+  # we set in api-deployment.yaml's RollingUpdate (maxUnavailable: 0).
+  minReplicas: 2
+  maxReplicas: 10
+
+  # Two metrics — scale UP when EITHER trips, scale DOWN only when BOTH
+  # are below their targets. Targets are intentionally conservative
+  # because the workload is async-IO bound; CPU is the leading signal.
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  # Stabilization windows prevent flapping. A spiky load (e.g. JARVIS
+  # boot tour rendering across many tabs at once) shouldn't trigger a
+  # scale-up on a 30 s blip nor a scale-down the moment it ends.
+  behavior:
+    scaleUp:
+      # Allow doubling pods over a 60 s window if pressure is sustained.
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max     # use whichever policy permits MORE growth
+    scaleDown:
+      # Five-minute stabilization before scaling down — the cost of
+      # holding an extra pod for 5 min is much lower than the cost of
+      # premature drain causing a queue-backup blip.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+      selectPolicy: Min     # use whichever policy is MORE conservative
