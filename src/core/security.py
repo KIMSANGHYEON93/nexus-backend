@@ -84,7 +84,7 @@ class JwksCache:
     def __init__(self, settings: Settings, ttl: int = DEFAULT_TTL_SECONDS) -> None:
         self._settings = settings
         self._ttl = ttl
-        self._keys: dict[str, dict] = {}
+        self._keys: dict[str, dict[str, Any]] = {}
         self._issuer: str = ""
         self._fetched_at: float = 0.0
         self._lock = asyncio.Lock()
@@ -98,7 +98,7 @@ class JwksCache:
     def _is_fresh(self) -> bool:
         return bool(self._keys) and (time.monotonic() - self._fetched_at) < self._ttl
 
-    async def get_key(self, kid: str) -> dict:
+    async def get_key(self, kid: str) -> dict[str, Any]:
         """Return the JWK matching `kid`. Refreshes on miss exactly once."""
         if kid in self._keys and self._is_fresh():
             return self._keys[kid]

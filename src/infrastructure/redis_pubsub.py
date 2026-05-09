@@ -32,11 +32,15 @@ async def init_client(settings: Settings) -> redis.Redis:
     global _client
     if _client is not None:
         return _client
-    _client = redis.from_url(
+    # redis-py 5's `from_url` factory ships untyped in current stubs (it's a
+    # classmethod that returns Self via runtime introspection); annotate the
+    # left-hand side and silence the narrow no-untyped-call warning.
+    client: redis.Redis = redis.from_url(  # type: ignore[no-untyped-call]
         settings.redis_url,
         encoding="utf-8",
         decode_responses=True,
     )
+    _client = client
     await _client.ping()
     return _client
 

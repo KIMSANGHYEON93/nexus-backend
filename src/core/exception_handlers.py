@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from http import HTTPStatus
 
+from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -46,7 +47,10 @@ def _phrase(status_code: int) -> str:
         return "Error"
 
 
-def _problem_response(problem: ProblemDetail, headers: dict | None = None) -> JSONResponse:
+def _problem_response(
+    problem: ProblemDetail,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     return JSONResponse(
         status_code=problem.status,
         content=problem.model_dump(exclude_none=True),
@@ -126,8 +130,16 @@ async def unhandled_exception_handler(
     return _problem_response(problem)
 
 
-def install(app) -> None:
-    """Register all three handlers on a FastAPI app. Call once at import time."""
-    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
-    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+def install(app: FastAPI) -> None:
+    """Register all three handlers on a FastAPI app. Call once at import time.
+
+    Starlette's `add_exception_handler` types the handler as
+    `Callable[[Request, Exception], ...]` (broadest), but FastAPI / Starlette
+    dispatch by exception type at runtime — passing the narrower
+    `Callable[[Request, HTTPException], ...]` is the documented pattern and
+    works correctly. The `arg-type` ignores are scoped to that single
+    contravariance mismatch.
+    """
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)

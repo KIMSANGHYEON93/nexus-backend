@@ -18,3 +18,49 @@ filterwarnings = [
     # event-loop close in Python 3.13+; ignore it so tests don't flake on Win.
     "ignore::ResourceWarning",
 ]
+
+
+# ── mypy ────────────────────────────────────────────────────────────────
+#
+# Strict mode is the team contract. Every new module starts strict; the
+# per-library overrides below are for third-party packages that ship no
+# stubs OR ship stubs we don't want to import (jose's are partial). Tests
+# get a slightly relaxed surface so AsyncMock-based fakes don't require us
+# to type-erase the production interfaces.
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "db"]
+exclude = ["dist", "build", ".pytest_cache"]
+plugins = []
+mypy_path = "."
+namespace_packages = true
+explicit_package_bases = true
+# Pretty output that highlights the offending column.
+pretty = true
+show_error_codes = true
+show_column_numbers = true
+# Catch the "you wrote `# type: ignore` for nothing" mistakes on green builds.
+warn_unused_ignores = true
+
+# jose has partial stubs upstream; treat it as untyped to avoid false-positive
+# `Any` warnings ricocheting from its own internals.
+[[tool.mypy.overrides]]
+module = ["jose.*"]
+ignore_missing_imports = true
+
+# asyncpg's type info is incomplete (Pool / Connection generics in particular).
+# Treat as untyped at the boundary; our own wrappers (database.py) re-establish
+# the contract.
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
+# Tests routinely build MagicMock / AsyncMock fakes whose untyped surface is
+# the point. Drop strict-ness on tests but keep the major checks active.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs    = false
+disallow_incomplete_defs = false
+warn_return_any          = false

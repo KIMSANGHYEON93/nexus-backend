@@ -49,6 +49,7 @@ async def test_prod_no_creds_raises_401(settings_prod_no_entra):
     with pytest.raises(HTTPException) as exc:
         await get_current_user(creds=None, settings=settings_prod_no_entra)
     assert exc.value.status_code == 401
+    assert exc.value.headers is not None
     assert "Bearer" in exc.value.headers.get("WWW-Authenticate", "")
 
 

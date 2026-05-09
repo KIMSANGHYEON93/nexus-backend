@@ -22,6 +22,11 @@ ASGIScope = dict[str, Any]
 ASGIMessage = dict[str, Any]
 ASGIReceive = Callable[[], Awaitable[ASGIMessage]]
 ASGISend = Callable[[ASGIMessage], Awaitable[None]]
+# An ASGI app is a callable taking (scope, receive, send) and returning an
+# awaitable. Spelled out here because importing Starlette's `ASGIApp` type
+# would couple this module to the framework — the middleware itself is
+# vanilla ASGI by design.
+ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
 
 
 class RequestIdMiddleware:
@@ -37,7 +42,7 @@ class RequestIdMiddleware:
         that outlive the response don't inherit a stale id.
     """
 
-    def __init__(self, app: Callable, header_name: str = REQUEST_ID_HEADER) -> None:
+    def __init__(self, app: ASGIApp, header_name: str = REQUEST_ID_HEADER) -> None:
         self.app = app
         self._header_lower_bytes = header_name.lower().encode("latin-1")
 

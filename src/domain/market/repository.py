@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 import asyncpg
 
@@ -57,7 +58,7 @@ class MarketRepository:
         )
 
     # ── Edges ───────────────────────────────────────────────────────────
-    async def list_edges(self, limit: int = 2000) -> list[dict]:
+    async def list_edges(self, limit: int = 2000) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
             """
             SELECT from_id AS "from", to_id AS "to", weight
@@ -88,7 +89,7 @@ class MarketRepository:
         )
 
     # ── Latest 1m OHLC (continuous aggregate read) ──────────────────────
-    async def latest_ohlc_1m(self, symbol: str, limit: int = 60) -> list[dict]:
+    async def latest_ohlc_1m(self, symbol: str, limit: int = 60) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
             """
             SELECT bucket, open, high, low, close, volume

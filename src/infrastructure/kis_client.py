@@ -19,6 +19,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from enum import Enum
+from typing import Any
 
 from ..core.config import Settings
 
@@ -65,7 +66,7 @@ class KisClient:
         self._state = KisConnectionState.CONNECTED
         logger.info("KIS websocket stub — connected")
 
-    async def subscribe(self, symbols: list[str]) -> AsyncIterator[dict]:
+    async def subscribe(self, symbols: list[str]) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized tick/quote frames from the live stream.
 
         Stub yields nothing and exits cleanly so the rest of the app can

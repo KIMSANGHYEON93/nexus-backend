@@ -14,6 +14,7 @@ middleware (including CORS) and every log record carries the id.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -38,7 +39,7 @@ configure_logging(level=_bootstrap_settings.log_level)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(level=settings.log_level)
     logger = logging.getLogger("nexus.main")
@@ -115,7 +116,12 @@ app = FastAPI(
 
 
 # RequestId FIRST so it becomes the outermost layer.
-app.add_middleware(RequestIdMiddleware)
+# Starlette's add_middleware() is generic over `_MiddlewareClass[*P]`; pure
+# ASGI middlewares like ours don't satisfy that protocol because they take
+# scope/receive/send rather than the Starlette-flavored Request/Response
+# wrapper. The runtime accepts this fine — Starlette only inspects __init__
+# arity at registration time. The `arg-type` ignore is narrowly scoped here.
+app.add_middleware(RequestIdMiddleware)  # type: ignore[arg-type]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_bootstrap_settings.cors_origin_list,
@@ -132,5 +138,5 @@ app.include_router(ws_router)
 
 
 @app.get("/", include_in_schema=False)
-async def root() -> dict:
+async def root() -> dict[str, str]:
     return {"service": "nexus-backend", "docs": "/docs", "health": "/v1/health"}

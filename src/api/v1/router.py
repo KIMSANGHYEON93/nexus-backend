@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
@@ -35,7 +35,7 @@ def _repo() -> MarketRepository:
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health() -> dict[str, str]:
     """Liveness probe — does NOT touch DB or Redis (use /readyz for that)."""
     return {"status": "ok", "service": "nexus-backend"}
 
@@ -91,7 +91,7 @@ async def readyz() -> ReadinessDTO:
 @router.get("/me")
 async def me(
     principal: Annotated[Principal, Depends(require_principal)],
-) -> dict:
+) -> dict[str, Any]:
     """Echo the authenticated identity. Useful for verifying the Entra
     bearer flow end-to-end from the browser."""
     return {

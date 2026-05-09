@@ -29,9 +29,11 @@ def _capture_to_buffer() -> tuple[io.StringIO, logging.Logger]:
     buf = io.StringIO()
     configure_logging("DEBUG")
     root = logging.getLogger()
-    # Replace stream of our just-installed handler with the buffer.
+    # Replace stream of our just-installed handler with the buffer. Only
+    # StreamHandler instances expose .stream — narrow before assigning.
     for h in root.handlers:
-        h.stream = buf
+        if isinstance(h, logging.StreamHandler):
+            h.stream = buf
     return buf, logging.getLogger("nexus.test")
 
 
@@ -80,7 +82,7 @@ def test_exc_info_renders_as_string():
 async def test_request_id_propagates_into_child_tasks():
     buf, log = _capture_to_buffer()
 
-    async def child():
+    async def child() -> None:
         log.info("from child")
 
     token = request_id_var.set("rid-parent")

@@ -30,6 +30,11 @@ jobs:
       - name: Install dev deps
         run: pip install --no-cache-dir -r requirements-dev.txt
 
+      - name: mypy --strict
+        # Strict mode is the team contract — see [tool.mypy] in pyproject.toml.
+        # Any new file or return type without an annotation fails the build.
+        run: mypy
+
       - name: pytest
         # Strict: any deprecation warning fails. See pyproject.toml for filters.
         run: pytest -v --tb=short

@@ -17,7 +17,7 @@ import pytest
 SEED = Path(__file__).parent.parent / "db" / "seeds" / "dev.sql"
 
 
-def _entity_rows(sql: str) -> list[tuple]:
+def _entity_rows(sql: str) -> list[tuple[str, str, str, str]]:
     """Pull every (id, cluster, anomaly, tx_vol) tuple out of the entity INSERT."""
     block_match = re.search(
         r"INSERT INTO entity[^;]+VALUES\s*(.+?)\s*ON CONFLICT",

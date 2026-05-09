@@ -20,6 +20,7 @@ import json
 import logging
 import random
 from datetime import datetime, timezone
+from typing import Any
 
 import redis.asyncio as redis
 
@@ -134,7 +135,7 @@ class MockPublisher:
             )
             raise
 
-    def _next_tick(self) -> dict:
+    def _next_tick(self) -> dict[str, Any]:
         """Generate one synthetic tick. Geometric random walk so prices
         drift naturally rather than jittering around a fixed mean.
 
