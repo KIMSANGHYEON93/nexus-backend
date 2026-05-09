@@ -1,0 +1,128 @@
+# NEXUS OS Backend (FastAPI).
+#
+# Three Kubernetes probe types in use, each calibrated to a different
+# question — they are NOT interchangeable:
+#
+#   startupProbe   — "is the app finishing its boot?" (long, lenient)
+#                    Boot is bounded by lifespan: configure_logging +
+#                    init_pool + init_client + verify_schema. Mock
+#                    publisher startup is non-blocking. 60s grace.
+#                    While startupProbe is running, the other two are
+#                    suspended — protects against a slow boot being
+#                    misread as a runtime fault.
+#
+#   livenessProbe  — "is the process wedged?" Hits /v1/health which is
+#                    documented to NOT touch DB or Redis. Failure here
+#                    means the event loop or HTTP server itself is stuck;
+#                    Kubernetes responds by killing the pod.
+#
+#   readinessProbe — "should the LB send traffic to this pod yet?" Hits
+#                    /v1/readyz which does the full DB ping + Redis ping
+#                    + schema_version check. A pod whose DB is briefly
+#                    unreachable is removed from the Service endpoints
+#                    until it recovers — without restarting the pod.
+#
+# Resource sizing is conservative: a single uvicorn worker on this
+# request shape (mostly async-IO) handles ~1k req/s within 256Mi.
+# Scale horizontally by bumping `replicas` rather than vertically.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-api
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-api
+    app.kubernetes.io/part-of: nexus-os
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2                          # 2-pod minimum so a rolling restart
+                                       # never drops to zero capacity.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus-api
+        app.kubernetes.io/part-of: nexus-os
+        app.kubernetes.io/component: api
+    spec:
+      terminationGracePeriodSeconds: 30
+      # Image must be built + pushed by CI; this manifest references the
+      # tag — operators bump on deploy. `nexus-backend:` is a placeholder;
+      # update the registry prefix to match your environment.
+      containers:
+        - name: api
+          image: nexus-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          # ConfigMap → non-secret env. Secret → DSNs + KIS / Entra.
+          # `envFrom` flattens both into the container env — all keys
+          # that exist downstream of `Settings` in core/config.py.
+          envFrom:
+            - configMapRef:
+                name: nexus-backend-config
+            - secretRef:
+                name: nexus-backend-secrets
+
+          # ── Probes ─────────────────────────────────────────────────
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12     # 12 × 5s = 60s total grace
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3      # 3 × 15s = 45s before kill
+          readinessProbe:
+            httpGet:
+              path: /v1/readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3      # 3 × 5s = 15s before LB removal
+
+          # ── Resources ──────────────────────────────────────────────
+          resources:
+            requests:
+              cpu:    "100m"
+              memory: "256Mi"
+            limits:
+              cpu:    "1000m"
+              memory: "512Mi"
+
+          # ── Security context — defense in depth ────────────────────
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem:   true
+            runAsNonRoot:             true
+            runAsUser:                10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem=true means Python needs writable /tmp
+            # for asyncio's DNS cache + httpx's temp files. EmptyDir is
+            # tmpfs by default — fast and ephemeral.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

@@ -1,0 +1,87 @@
+# TimescaleDB — STATEFUL by design.
+#
+# Why a StatefulSet (not Deployment): we promise the operator that data
+# survives a pod replacement. StatefulSet's volumeClaimTemplates issues a
+# PersistentVolumeClaim per pod with a stable name (`pgdata-timescaledb-0`)
+# that gets re-attached when the pod is recreated. A Deployment with a
+# shared PVC would race on volume mount during rolling updates.
+#
+# Replicas: 1. Multi-master TimescaleDB needs Patroni or pgpool — out of
+# scope for this initial scaffold. Scaling reads later goes through
+# read-only replicas defined in a separate StatefulSet.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  serviceName: timescaledb        # MUST match the headless service name
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: timescaledb
+        app.kubernetes.io/part-of: nexus-os
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:latest-pg15
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: timescaledb-credentials
+          # PGDATA writes go under /var/lib/postgresql/data — same path
+          # the docker-compose volume mounts to. Override the default
+          # subdir so `lost+found` on the PV doesn't confuse initdb.
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` is the canonical Postgres readiness check —
+          # answers within milliseconds and only succeeds after the
+          # database has finished crash-recovery.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nexus_admin", "-d", "nexus_os"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nexus_admin", "-d", "nexus_os"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu:    "500m"
+              memory: "1Gi"
+            limits:
+              cpu:    "2000m"
+              memory: "4Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+        # storageClassName intentionally omitted — clusters supply their
+        # own default. Pin it here once an SSD-backed class is chosen.

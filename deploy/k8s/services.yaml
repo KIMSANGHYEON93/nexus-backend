@@ -1,0 +1,75 @@
+# Services — three flavors, each chosen for what they expose to whom.
+#
+#   timescaledb (Headless)  — clusterIP: None. The StatefulSet's stable
+#                             pod DNS (`timescaledb-0.timescaledb`) is
+#                             what asyncpg connects to. Headless Services
+#                             skip kube-proxy load-balancing — appropriate
+#                             when there's exactly one writer.
+#
+#   redis (ClusterIP)        — single-replica pub/sub broker, internal-only.
+#
+#   nexus-api (ClusterIP)    — internal-only. An Ingress / Gateway API
+#                             resource (NOT in this file — cluster-specific)
+#                             terminates TLS and routes external traffic.
+
+# ── TimescaleDB headless service ───────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+
+---
+# ── Redis ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: nexus-os
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+
+---
+# ── NEXUS OS Backend API ───────────────────────────────────────────────
+# Exposes both HTTP (REST) and the WebSocket upgrade path on the same
+# port — Starlette dispatches by ASGI scope type internally.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-api
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-api
+    app.kubernetes.io/part-of: nexus-os
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nexus-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,20 @@
+# Non-sensitive runtime config. Anything that ends up in `git log -p` is fair
+# game for this ConfigMap; secrets live in secret.yaml. Pods consume both via
+# `envFrom` so adding a new key here flows into the API container without
+# editing the Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-backend-config
+  namespace: nexus-os
+  labels:
+    app.kubernetes.io/name: nexus-backend
+    app.kubernetes.io/part-of: nexus-os
+data:
+  APP_ENV:       "production"
+  LOG_LEVEL:     "INFO"
+  # Comma-separated origins the frontend is served from. Override per-cluster.
+  CORS_ORIGINS:  "https://nexus.example.com"
+  # KIS environment switch — `paper` for sandbox, `live` for real money.
+  # Keep `paper` until the operator explicitly cuts over.
+  KIS_ENV:       "paper"

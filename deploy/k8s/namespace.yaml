@@ -1,0 +1,9 @@
+# Dedicated namespace so the whole stack can be torn down with a single
+# `kubectl delete ns nexus-os`. Operators free to rename — every other
+# manifest in this folder uses the namespace declared here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus-os
+  labels:
+    app.kubernetes.io/part-of: nexus-os
