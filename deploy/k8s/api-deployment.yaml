@@ -54,12 +54,22 @@ spec:
         app.kubernetes.io/component: api
     spec:
       terminationGracePeriodSeconds: 30
-      # Image must be built + pushed by CI; this manifest references the
-      # tag — operators bump on deploy. `nexus-backend:` is a placeholder;
-      # update the registry prefix to match your environment.
+      # Image is built + pushed by .github/workflows/backend.yml on every
+      # push to main and on every semver tag. Default points at GHCR and
+      # the public repo path — change OWNER below to your fork's path.
+      # Tags emitted by CI:
+      #   :latest        — head of main (rolling)
+      #   :main          — same as :latest, explicit branch ref
+      #   :sha-<short>   — pin to a specific commit
+      #   :v1.2.3        — semver release
+      #   :1.2 / :1      — semver shorthand, follow the major/minor line
+      #
+      # Production deploys SHOULD pin to a sha or semver tag, not :latest,
+      # so a rolled-back code change in main can't silently roll forward
+      # the next time a pod restarts.
       containers:
         - name: api
-          image: nexus-backend:latest
+          image: ghcr.io/OWNER/nexus-os-design-system-backend:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -45,13 +45,52 @@ to any Kubernetes cluster (kind, minikube, AKS, GKE, EKS — agnostic).
 
 ### 1. Build and push the API image
 
-```bash
-# From the repo root:
-docker build -t <your-registry>/nexus-backend:0.1.0 .
-docker push    <your-registry>/nexus-backend:0.1.0
+`.github/workflows/backend.yml` does this automatically — every push
+to `main` and every `v*.*.*` tag pushes a multi-tagged image to GHCR
+under `ghcr.io/<owner>/nexus-os-design-system-backend`.
 
-# Then update the image reference in api-deployment.yaml:
-#   image: <your-registry>/nexus-backend:0.1.0
+For a manual one-off (e.g. before CI is wired up):
+
+```bash
+# Log in to GHCR — the GitHub CLI handles credentials.
+echo $GITHUB_TOKEN | docker login ghcr.io -u <your-username> --password-stdin
+
+# From the nexus-backend repo root:
+docker build -t ghcr.io/<owner>/nexus-os-design-system-backend:0.1.0 .
+docker push    ghcr.io/<owner>/nexus-os-design-system-backend:0.1.0
+```
+
+Then edit the image reference in `api-deployment.yaml` to replace the
+`OWNER` placeholder with the actual GitHub organization or username.
+
+For production deploys, **pin to a semver tag or commit sha**, not
+`:latest`. A rolled-back code change in `main` would otherwise
+silently roll forward the next time a pod restarts.
+
+```yaml
+# Recommended in api-deployment.yaml for production:
+image: ghcr.io/your-org/nexus-os-design-system-backend:v1.2.3
+# or:
+image: ghcr.io/your-org/nexus-os-design-system-backend:sha-abc1234
+```
+
+If your GHCR repo is **private**, also create an `imagePullSecret`:
+
+```bash
+kubectl -n nexus-os create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io \
+  --docker-username=<your-username> \
+  --docker-password=$GITHUB_TOKEN
+```
+
+…and reference it in `api-deployment.yaml`:
+
+```yaml
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
 ```
 
 ### 2. Populate secrets

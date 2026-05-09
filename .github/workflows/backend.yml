@@ -1,18 +1,34 @@
 name: backend CI
 
-# Runs on every push to main and on every pull request. The three jobs
-# fan out so a slow Docker build doesn't gate fast pytest feedback.
+# Runs on every push to main, every pull request, and every tag matching
+# v*.*.* (semver releases). The four jobs fan out so a slow Docker build
+# doesn't gate fast pytest feedback.
 
 on:
   push:
     branches: [main]
+    tags:    ['v*.*.*']
   pull_request:
 
+# Most jobs only need read access. The image-publish job overrides this
+# with packages: write at the job level — least-privilege keeps any other
+# CI step from accidentally publishing a package.
 permissions:
   contents: read
 
+# Buffer concurrent runs on the same ref. A second push to the same PR
+# cancels the first run; pushes to main / tags never cancel each other so
+# release builds always finish even if a hotfix lands seconds later.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-backend
+
 jobs:
-  # ── Fast feedback: 22 unit tests + 6 dep-gated integration tests ──────
+  # ── Fast feedback: mypy --strict + pytest (~50 cases) ─────────────────
   test:
     name: pytest
     runs-on: ubuntu-latest
@@ -46,25 +62,86 @@ jobs:
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
-
       - name: docker compose config
         run: docker compose config --quiet
 
-  # ── Image build — smoke test the Dockerfile (no push, no run) ─────────
+  # ── PR build — smoke test the Dockerfile, no push ─────────────────────
+  # On a PR we want to verify the Dockerfile still produces a buildable
+  # image but we DO NOT want to publish from a fork. Layer cache reuse
+  # makes second-and-subsequent builds fast.
   image-build:
-    name: docker build
+    name: docker build (PR smoke test)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
-
       - name: build image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: nexus-backend:ci
+          tags: nexus-backend:pr-${{ github.event.pull_request.number }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Main / tag publish — push to GHCR ─────────────────────────────────
+  # Runs only on push to main OR a tagged release; never on PRs.
+  # docker/metadata-action computes the right tag set:
+  #   • push to main      → :latest, :main, :sha-<short>
+  #   • push tag v1.2.3   → :v1.2.3, :1.2, :1, :latest
+  # All produced from a single build (cached by setup-buildx).
+  image-publish:
+    name: docker publish (ghcr.io)
+    if: github.event_name == 'push'
+    needs: [test, compose-validate]      # gate publish on test + compose pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write                    # required to push to GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag policy:
+          #   • main branch → 'main' + 'latest' + 'sha-<short>'
+          #   • semver tags → '1', '1.2', '1.2.3' + 'latest'
+          # OCI labels (org.opencontainers.image.*) are auto-populated
+          # from the GitHub event payload — provenance baked in.
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build provenance attestation — supply-chain hygiene. Lets
+          # `cosign verify-attestation` confirm the image came from this
+          # repo's CI (not a tampered local build).
+          provenance: true
+          sbom: true
