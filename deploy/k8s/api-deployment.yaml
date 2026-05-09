@@ -69,7 +69,7 @@ spec:
       # the next time a pod restarts.
       containers:
         - name: api
-          image: ghcr.io/OWNER/nexus-os-design-system-backend:latest
+          image: ghcr.io/OWNER/nexus-backend:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

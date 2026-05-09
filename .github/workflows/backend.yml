@@ -25,7 +25,10 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}-backend
+  # Image path follows the repo name 1:1 — recommended naming for the
+  # repo itself is `nexus-backend`, which produces a clean
+  # ghcr.io/<owner>/nexus-backend:<tag> path. No suffix collision risk.
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   # ── Fast feedback: mypy --strict + pytest (~50 cases) ─────────────────

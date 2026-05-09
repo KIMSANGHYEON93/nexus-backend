@@ -50,7 +50,7 @@ to any Kubernetes cluster (kind, minikube, AKS, GKE, EKS — agnostic).
 
 `.github/workflows/backend.yml` does this automatically — every push
 to `main` and every `v*.*.*` tag pushes a multi-tagged image to GHCR
-under `ghcr.io/<owner>/nexus-os-design-system-backend`.
+under `ghcr.io/<owner>/nexus-backend`.
 
 For a manual one-off (e.g. before CI is wired up):
 
@@ -59,8 +59,8 @@ For a manual one-off (e.g. before CI is wired up):
 echo $GITHUB_TOKEN | docker login ghcr.io -u <your-username> --password-stdin
 
 # From the nexus-backend repo root:
-docker build -t ghcr.io/<owner>/nexus-os-design-system-backend:0.1.0 .
-docker push    ghcr.io/<owner>/nexus-os-design-system-backend:0.1.0
+docker build -t ghcr.io/<owner>/nexus-backend:0.1.0 .
+docker push    ghcr.io/<owner>/nexus-backend:0.1.0
 ```
 
 Then edit the image reference in `api-deployment.yaml` to replace the
@@ -72,9 +72,9 @@ silently roll forward the next time a pod restarts.
 
 ```yaml
 # Recommended in api-deployment.yaml for production:
-image: ghcr.io/your-org/nexus-os-design-system-backend:v1.2.3
+image: ghcr.io/your-org/nexus-backend:v1.2.3
 # or:
-image: ghcr.io/your-org/nexus-os-design-system-backend:sha-abc1234
+image: ghcr.io/your-org/nexus-backend:sha-abc1234
 ```
 
 If your GHCR repo is **private**, also create an `imagePullSecret`:
