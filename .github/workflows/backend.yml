@@ -47,7 +47,9 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - name: Install dev deps
-        run: pip install --no-cache-dir -r requirements-dev.txt
+        # No --no-cache-dir here: the setup-python `cache: pip` step needs
+        # ~/.cache/pip populated to persist between runs.
+        run: pip install -r requirements-dev.txt
 
       - name: mypy --strict
         # Strict mode is the team contract — see [tool.mypy] in pyproject.toml.
@@ -65,6 +67,14 @@ jobs:
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
+
+      - name: Stage stub .env from .env.example
+        # docker-compose.yml has `env_file: .env`. The runner doesn't carry
+        # the real .env (it's gitignored — secrets live in the cluster).
+        # The example file has the same key shape with empty values, which
+        # is enough to satisfy `compose config` schema validation.
+        run: cp .env.example .env
+
       - name: docker compose config
         run: docker compose config --quiet
 
