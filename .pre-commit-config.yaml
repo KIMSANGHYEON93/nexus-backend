@@ -1,0 +1,75 @@
+# Pre-commit hooks — run the same gates as CI, locally, before the
+# commit lands. Catches mypy / yaml / whitespace regressions BEFORE
+# `git push`, which is much faster feedback than waiting for the
+# GitHub Actions cycle.
+#
+# Setup (one-time, per-clone):
+#   pipx install pre-commit          # or `pip install --user pre-commit`
+#   pre-commit install               # writes .git/hooks/pre-commit
+#
+# Run on the whole repo (e.g. before opening a big PR):
+#   pre-commit run --all-files
+#
+# Skip hooks for a single emergency commit:
+#   git commit --no-verify  -m "..."   # use sparingly — CI still gates
+
+repos:
+  # ── Hygiene — stdlib hooks bundled with the framework ─────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # K8s manifests use multi-doc files (services.yaml has 3, secret has 2).
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=500]            # block accidental DB dumps / wheels
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # ── Type-checking — mypy in strict mode (matches pyproject.toml) ──
+  # We run mypy as a *local* hook rather than via mirrors-mypy because
+  # it must use the project's own pyproject.toml config + the version
+  # pinned in requirements-dev.txt. Hooks pinned to mirror revs would
+  # silently diverge from CI.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict (project config)
+        entry: mypy
+        language: system
+        types_or: [python]
+        # Mypy walks the whole project; running per-file misses
+        # cross-module inference. Pass --no-error-summary to keep the
+        # commit log uncluttered.
+        pass_filenames: false
+        args: [--no-error-summary]
+
+      # ── pytest — fast subset on every commit ──────────────────────
+      # Full suite runs in CI; locally we run only the unit tests that
+      # don't need asyncpg / fastapi (~22 tests, sub-second). The full
+      # suite is one `pytest` away when wanted.
+      - id: pytest-fast
+        name: pytest (offline subset)
+        entry: pytest
+        language: system
+        types_or: [python]
+        pass_filenames: false
+        args: [
+          "--quiet",
+          "--no-header",
+          "tests/test_logging.py",
+          "tests/test_middleware.py",
+          "tests/test_errors.py",
+          "tests/test_anomaly.py",
+          "tests/test_seed.py",
+        ]
+
+# Default settings: don't run network-dependent hooks if we're
+# committing offline (e.g. on a plane).
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+fail_fast: false                   # show ALL failing hooks, not just the first
