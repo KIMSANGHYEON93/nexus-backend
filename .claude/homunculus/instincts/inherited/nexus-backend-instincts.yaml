@@ -1,0 +1,280 @@
+# Instincts generated from https://github.com/KIMSANGHYEON93/nexus-backend
+# Generated: 2026-05-09T14:01:02.440Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: nexus-backend-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat
+
+## Evidence
+
+- 1 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat(5c.1): KisClient.authenticate() — REST OAuth2 + token caching
+
+---
+id: nexus-backend-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Commit Length
+
+## Action
+
+Write moderate-length commit messages (~66 characters)
+
+## Evidence
+
+- Average commit message length: 66 chars
+- Based on 1 commits
+
+---
+id: nexus-backend-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: nexus-backend-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: nexus-backend-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: nexus-backend-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: nexus-backend-instinct-file-naming
+trigger: "When creating a new Python file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct File Naming
+
+## Action
+
+Name the file using snake_case
+
+## Evidence
+
+- Pattern in files: src/, tests/
+
+---
+id: nexus-backend-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in src/ functions
+
+---
+id: nexus-backend-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase
+
+## Evidence
+
+- Pattern in src/ classes
+
+---
+id: nexus-backend-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in src/ constants
+
+---
+id: nexus-backend-instinct-import-style
+trigger: "When importing modules within the package"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in src/ imports
+
+---
+id: nexus-backend-instinct-export-style
+trigger: "When exporting functions or classes"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in src/ exports
+
+---
+id: nexus-backend-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Test Location
+
+## Action
+
+Place test files in the separate tests/ folder
+
+## Evidence
+
+- Pattern: testLocation is 'separate'
+- tests/ folder exists
+
+---
+id: nexus-backend-instinct-commit-format
+trigger: "When making a git commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: KIMSANGHYEON93/nexus-backend
+---
+
+# Nexus Backend Instinct Commit Format
+
+## Action
+
+Format the commit message as 'feat(scope): description' following Conventional Commits
+
+## Evidence
+
+- Seen in commit: 'feat(5c.1): KisClient.authenticate() — REST OAuth2 + token caching'
+
