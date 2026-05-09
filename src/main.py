@@ -26,7 +26,8 @@ from .core.exception_handlers import install as install_exception_handlers
 from .core.logging import configure_logging
 from .core.middleware import RequestIdMiddleware
 from .infrastructure.database import close_pool, init_pool, verify_schema
-from .infrastructure.redis_pubsub import close_client, init_client
+from .infrastructure.mock_publisher import MockPublisher
+from .infrastructure.redis_pubsub import close_client, get_client, init_client
 
 
 # Configure logging at import time so module-load messages also flow
@@ -73,10 +74,34 @@ async def lifespan(app: FastAPI):
             extra={"event": "startup_schema_error"},
         )
 
+    # Mock publisher: only when this looks like a credential-less dev box.
+    # In any other configuration we let the real KIS adapter (Sprint 4c)
+    # own the channel — running both would collide on the same Redis key.
+    mock_publisher: MockPublisher | None = None
+    has_kis_creds = bool(settings.kis_app_key and settings.kis_app_secret)
+    if settings.app_env == "development" and not has_kis_creds:
+        mock_publisher = MockPublisher(get_client())
+        await mock_publisher.start()
+        logger.info(
+            "mock publisher armed (dev mode, no KIS creds)",
+            extra={"event": "mock_publisher_armed", "kis_env": settings.kis_env},
+        )
+    else:
+        logger.info(
+            "mock publisher NOT armed",
+            extra={
+                "event": "mock_publisher_skipped",
+                "app_env": settings.app_env,
+                "kis_creds": has_kis_creds,
+            },
+        )
+
     try:
         yield
     finally:
         logger.info("backend shutting down")
+        if mock_publisher is not None:
+            await mock_publisher.stop()
         await close_client()
         await close_pool()
 
