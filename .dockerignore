@@ -1,0 +1,54 @@
+# What `docker build` MUST NOT see.
+#
+# Two things to keep out of the image:
+#   1. Secrets — .env files at any depth.
+#   2. Anything not needed at runtime — tests, k8s manifests, dev tooling,
+#      VCS metadata, caches. Smaller context means faster builds AND a
+#      smaller attack surface inside the container.
+
+# ── Secrets ─────────────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ── Python build / run artefacts ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Source-only paths that shouldn't ride into the image ────────────────
+tests/
+deploy/
+.github/
+.pre-commit-config.yaml
+pyproject.toml          # mypy / pytest config — not needed at runtime
+requirements-dev.txt    # dev-only deps; runtime stage uses requirements.txt
+
+# ── VCS / editor / OS ───────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Logs / temporary build outputs ──────────────────────────────────────
+*.log
+build/
+dist/
+
+# ── Docker meta — don't try to COPY ourselves ──────────────────────────
+Dockerfile
+.dockerignore
+docker-compose.yml
