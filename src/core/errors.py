@@ -31,6 +31,7 @@ PROBLEM_MEDIA_TYPE = "application/problem+json"
 PROBLEM_TYPE_VALIDATION = "https://nexus-os.local/problems/validation-error"
 PROBLEM_TYPE_AUTH       = "https://nexus-os.local/problems/auth-failed"
 PROBLEM_TYPE_INTERNAL   = "https://nexus-os.local/problems/internal-error"
+PROBLEM_TYPE_UPSTREAM   = "https://nexus-os.local/problems/upstream-error"
 
 
 class ProblemDetail(BaseModel):

@@ -5,3 +5,7 @@ redis==5.0.1
 pydantic-settings==2.1.0
 python-jose[cryptography]==3.3.0
 httpx==0.26.0
+# KIS realtime gateway. 15.x is the post-redesign API (websockets.asyncio.client);
+# legacy websockets.client.connect emits a DeprecationWarning and pytest's
+# `filterwarnings = error` would fail on it.
+websockets==15.0.1

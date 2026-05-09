@@ -36,6 +36,27 @@ class Settings(BaseSettings):
     kis_app_secret: str = ""
     kis_account_number: str = ""
     kis_env: Literal["paper", "live"] = "paper"
+    # Subscribe list for the live publisher. Default mirrors the seeded
+    # KRX universe (db/seeds/dev.sql + MockPublisher) so the cutover is
+    # symbol-for-symbol comparable to the mock stream.
+    kis_subscribe_symbols: str = (
+        "005930,000660,035420,035720,105560,055550,"
+        "086790,005380,005490,051910,207940,068270"
+    )
+
+    # ── Trading execution (Sprint 5g) ──────────────────────────────────
+    # GLOBAL HARD SAFETY SWITCH. Default False — the OrderExecutor will
+    # only emit shadow-trade logs and NEVER call the KIS order REST API.
+    # MUST be hand-set on the production cluster (not in `.env.example`)
+    # so that no committed config can ever flip a paper-trading deploy
+    # into live trading by accident. Toggling this is the most consequential
+    # config change in the system; treat any commit that touches it as
+    # production-impact + audit-required.
+    allow_live_orders: bool = False
+    # Fixed order size used until Sprint 5h adds confidence-driven sizing.
+    # Per-symbol overrides come later; one global default is enough for
+    # the executor to do its job without baking in opinions on size.
+    default_order_quantity: int = 1
 
     # ── Microsoft Entra ID (OIDC) ──────────────────────────────────────
     entra_tenant_id: str = ""
@@ -49,6 +70,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def kis_subscribe_symbol_list(self) -> list[str]:
+        return [s.strip() for s in self.kis_subscribe_symbols.split(",") if s.strip()]
 
     @property
     def resolved_entra_issuer(self) -> str:

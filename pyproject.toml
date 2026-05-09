@@ -12,6 +12,9 @@ addopts = [
     "--strict-markers",
     "--tb=short",
 ]
+markers = [
+    "integration: hits a real upstream service (KIS, etc.) — opt-in, never on CI",
+]
 filterwarnings = [
     "error",                   # fail on warnings — surface deprecations early
     # asyncio's ProactorEventLoop on Windows logs a benign DEBUG line during

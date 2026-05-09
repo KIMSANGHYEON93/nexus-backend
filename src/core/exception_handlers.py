@@ -28,9 +28,11 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 
+from ..infrastructure.kis_client import KisAuthError, KisError, KisUpstreamError
 from .errors import (
     PROBLEM_MEDIA_TYPE,
     PROBLEM_TYPE_INTERNAL,
+    PROBLEM_TYPE_UPSTREAM,
     PROBLEM_TYPE_VALIDATION,
     ProblemDetail,
 )
@@ -104,6 +106,42 @@ async def validation_exception_handler(
     return _problem_response(problem)
 
 
+async def kis_exception_handler(
+    request: Request,
+    exc: KisError,
+) -> JSONResponse:
+    """Map KIS adapter failures to RFC 7807 502 Bad Gateway.
+
+    `KisAuthError` and `KisUpstreamError` both render as 502 with the
+    `upstream-error` problem-type URI; the discriminator is in the `detail`
+    string and in the structured log line emitted from `kis_client.py`.
+    Why 502 and not 401: the user IS authenticated to OUR backend — it's
+    our backend that failed to authenticate to KIS. 502 is the RFC-correct
+    'invalid response from upstream' code.
+    """
+    title = "Bad Gateway (KIS)"
+    detail = str(exc) or "Upstream KIS request failed"
+    logger.error(
+        "kis upstream failure",
+        extra={
+            "event":      "kis_upstream_error",
+            "path":       str(request.url.path),
+            "method":     request.method,
+            "error_type": type(exc).__name__,
+            "is_auth":    isinstance(exc, KisAuthError),
+        },
+    )
+    problem = ProblemDetail(
+        type=PROBLEM_TYPE_UPSTREAM,
+        title=title,
+        status=502,
+        detail=detail,
+        instance=str(request.url.path),
+        request_id=request_id_var.get(),
+    )
+    return _problem_response(problem)
+
+
 async def unhandled_exception_handler(
     request: Request,
     exc: Exception,
@@ -142,4 +180,5 @@ def install(app: FastAPI) -> None:
     """
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(KisError, kis_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)
