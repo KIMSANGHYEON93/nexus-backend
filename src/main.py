@@ -26,6 +26,20 @@ from .core.config import get_settings
 from .core.exception_handlers import install as install_exception_handlers
 from .core.logging import configure_logging
 from .core.middleware import RequestIdMiddleware
+from .domain.trading.context import TickContext
+from .domain.trading.coordinator import TradingCoordinator
+from .domain.trading.executor import OrderClient, OrderExecutor, OrderResult
+from .domain.trading.guardrails import (
+    CoolDownGuard,
+    GuardrailPipeline,
+    MaxPositionSizeGuard,
+    VolatilityCircuitBreaker,
+)
+from .domain.trading.macro_agent import MacroAgent, MockNewsProvider
+from .domain.trading.models import Action
+from .domain.trading.pipeline import TradingPipeline
+from .domain.trading.portfolio import Portfolio
+from .domain.trading.quant_agent import QuantAgent
 from .infrastructure.database import close_pool, init_pool, verify_schema
 from .infrastructure.publisher_supervisor import PublisherSupervisor
 from .infrastructure.redis_pubsub import close_client, get_client, init_client
@@ -36,6 +50,25 @@ from .infrastructure.redis_pubsub import close_client, get_client, init_client
 # re-applies it once settings are fully resolved.
 _bootstrap_settings = get_settings()
 configure_logging(level=_bootstrap_settings.log_level)
+
+
+class _NoopOrderClient:
+    """Fail-closed OrderClient placeholder for Sprint 5h.
+
+    The executor's `ALLOW_LIVE_ORDERS=False` default means this is never
+    invoked in practice. If someone manually flips the flag before the
+    real KisOrderClient is wired (Sprint 5i), this returns a clean
+    `success=False` rather than crashing — the executor will log it as
+    `live_order_rejected` and move on.
+    """
+
+    async def place_order(
+        self, *, symbol: str, action: Action, quantity: int,
+    ) -> OrderResult:
+        return OrderResult(
+            success=False, order_id=None,
+            message="no broker wired (Sprint 5h placeholder; flip ALLOW_LIVE_ORDERS only after Sprint 5i)",
+        )
 
 
 @asynccontextmanager
@@ -75,18 +108,58 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             extra={"event": "startup_schema_error"},
         )
 
-    # Publisher selection + runtime failover are owned by the supervisor:
+    # ── Sprint 5h trading pipeline ─────────────────────────────────────
+    # Build the agent + guard + executor stack ONCE at startup. The
+    # supervisor pipes every tick from whichever publisher is active
+    # (KIS or Mock) into pipeline.on_tick.
+    #
+    # Order client is intentionally a no-op here for Sprint 5h. The
+    # `ALLOW_LIVE_ORDERS=False` default means the executor never invokes
+    # it; if an operator manually flips the flag without first wiring a
+    # real broker (Sprint 5i), they get a clean rejection instead of an
+    # exception. Real KisOrderClient wiring needs the supervisor's
+    # KisClient access_token which is why it lives one sprint later.
+    tick_context = TickContext()
+    portfolio = Portfolio()
+    coordinator = TradingCoordinator()
+    coordinator.register(QuantAgent(context=tick_context))
+    coordinator.register(MacroAgent(
+        context=tick_context, news_provider=MockNewsProvider(),
+    ))
+    guards = GuardrailPipeline([
+        MaxPositionSizeGuard(max_shares=1000),
+        CoolDownGuard(cooldown_seconds=60.0),
+        VolatilityCircuitBreaker(),
+    ])
+    executor = OrderExecutor(
+        order_client=_NoopOrderClient(),
+        allow_live_orders=settings.allow_live_orders,
+        default_quantity=settings.default_order_quantity,
+    )
+    trading_pipeline = TradingPipeline(
+        context=tick_context, coordinator=coordinator, guardrails=guards,
+        executor=executor, portfolio=portfolio,
+    )
+
+    # ── Publisher selection + runtime failover (Sprint 5d) ─────────────
     #   • Bring-up: KIS if creds present and reachable; MockPublisher in dev
     #     if KIS bring-up fails or no creds.
     #   • Runtime: a watchdog inside the supervisor swaps to MockPublisher
     #     if the KIS publisher dies (token refresh exhausted, WS irrecoverable,
     #     etc.) so the canvas never goes silent during trading hours.
-    # See `infrastructure/publisher_supervisor.py` for the state diagram.
-    supervisor = PublisherSupervisor(get_client(), settings)
+    #   • on_tick: every parsed tick from the active publisher feeds the
+    #     trading pipeline above — survives KIS→mock failover.
+    supervisor = PublisherSupervisor(
+        get_client(), settings, on_tick=trading_pipeline.on_tick,
+    )
     await supervisor.start()
     logger.info(
         "publisher supervisor armed",
-        extra={"event": "supervisor_armed", "active": supervisor.active_kind},
+        extra={
+            "event":             "supervisor_armed",
+            "active":            supervisor.active_kind,
+            "allow_live_orders": settings.allow_live_orders,
+        },
     )
 
     try:

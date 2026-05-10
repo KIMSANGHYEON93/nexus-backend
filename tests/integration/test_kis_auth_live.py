@@ -21,7 +21,7 @@ import pytest
 # Load .env from the project root so this script works whether pytest is
 # invoked from `nexus-backend/` (normal) or from the repo root.
 try:
-    from dotenv import load_dotenv  # type: ignore[import-not-found]
+    from dotenv import load_dotenv
     _env_path = Path(__file__).resolve().parents[2] / ".env"
     if _env_path.is_file():
         load_dotenv(_env_path, override=False)
@@ -61,7 +61,9 @@ async def test_live_kis_authenticate_returns_real_token(caplog: pytest.LogCaptur
     await client.authenticate()
 
     # ── State + token assertions ────────────────────────────────────────
-    assert client.state is KisConnectionState.AUTHENTICATED
+    # Compare via .value to avoid mypy carrying the pre-call DISCONNECTED
+    # narrowing across the authenticate() boundary.
+    assert client.state.value == "authenticated"
     assert client.access_token is not None
     assert len(client.access_token) >= 20, "real KIS tokens are JWT-shaped (>>20 chars)"
     assert client.is_token_valid is True

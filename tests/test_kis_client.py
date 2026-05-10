@@ -448,7 +448,9 @@ async def test_close_resets_state_and_calls_ws_close():
         await client.close()
 
     assert fake_ws.closed is True
-    assert client.state is KisConnectionState.DISCONNECTED
+    # .value comparison sidesteps mypy's narrowed-Literal carry-through from
+    # the earlier `is CONNECTED` assertion across the close() boundary.
+    assert client.state.value == "disconnected"
     assert client.is_ws_open is False
     # Token + approval_key intentionally retained for fast re-connect.
     assert client.access_token is not None
@@ -634,10 +636,10 @@ class _ScriptedWebSocket:
         self.sent: list[str] = []
         self.closed = False
 
-    def __aiter__(self):
+    def __aiter__(self) -> Any:
         return self._iter()
 
-    async def _iter(self):
+    async def _iter(self) -> Any:
         for f in self._frames:
             yield f
 
@@ -711,9 +713,9 @@ async def test_stream_ticks_handles_connection_closed_gracefully():
 
     class _ClosingWs:
         sent: list[str] = []
-        def __aiter__(self):
+        def __aiter__(self) -> Any:
             return self._gen()
-        async def _gen(self):
+        async def _gen(self) -> Any:
             yield _make_h0stcnt0_frame([_make_h0stcnt0_record()])
             raise ConnectionClosed(Close(1000, "ok"), None)
         async def send(self, msg):  # noqa: ANN001, ANN201

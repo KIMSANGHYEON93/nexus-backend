@@ -8,8 +8,10 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
+
+from src.infrastructure.kis_client import KisClient as _KisClient  # for casts only
 
 import pytest
 
@@ -105,7 +107,7 @@ def _make_redis(captured: list[tuple[str, str]]) -> Any:
 async def test_publisher_subscribes_to_configured_symbols():
     captured: list[tuple[str, str]] = []
     fake_kis = _FakeKisClient(ticks=[])
-    pub = KisPublisher(_make_redis(captured), fake_kis, ["005930", "000660", "035420"])
+    pub = KisPublisher(_make_redis(captured), cast(_KisClient, fake_kis), ["005930", "000660", "035420"])
 
     await pub.start()
     await asyncio.sleep(0)  # let the task run
@@ -120,7 +122,7 @@ async def test_publisher_publishes_each_tick_to_correct_channel():
         _make_tick("005930", "79100", TickSide.BUY),
         _make_tick("000660", "197000", TickSide.SELL),
     ])
-    pub = KisPublisher(_make_redis(captured), fake_kis, ["005930", "000660"])
+    pub = KisPublisher(_make_redis(captured), cast(_KisClient, fake_kis), ["005930", "000660"])
 
     await pub.start()
     # Wait for the run loop to finish processing all scripted ticks.
@@ -152,7 +154,7 @@ async def test_publisher_publishes_each_tick_to_correct_channel():
 async def test_publisher_start_is_idempotent():
     captured: list[tuple[str, str]] = []
     fake_kis = _FakeKisClient(ticks=[])
-    pub = KisPublisher(_make_redis(captured), fake_kis, ["005930"])
+    pub = KisPublisher(_make_redis(captured), cast(_KisClient, fake_kis), ["005930"])
 
     await pub.start()
     await pub.start()  # second call must be a no-op
@@ -164,7 +166,7 @@ async def test_publisher_start_is_idempotent():
 async def test_publisher_stop_is_safe_when_never_started():
     captured: list[tuple[str, str]] = []
     fake_kis = _FakeKisClient(ticks=[])
-    pub = KisPublisher(_make_redis(captured), fake_kis, ["005930"])
+    pub = KisPublisher(_make_redis(captured), cast(_KisClient, fake_kis), ["005930"])
     await pub.stop()  # must not raise
     assert pub.is_running is False
 
@@ -219,7 +221,7 @@ class _FakeKisClientForRefresh:
 async def test_refresh_triggers_when_token_within_headroom():
     """Token expires in 5s, headroom is 30s → refresh on first tick."""
     kis = _FakeKisClientForRefresh(expires_in_seconds=5.0)
-    loop = _TokenRefreshLoop(kis, headroom_seconds=30.0, interval_seconds=0.1)
+    loop = _TokenRefreshLoop(cast(_KisClient, kis), headroom_seconds=30.0, interval_seconds=0.1)
     await loop.start()
     # Wait for at least one refresh tick.
     for _ in range(50):
@@ -236,7 +238,7 @@ async def test_refresh_triggers_when_token_within_headroom():
 async def test_refresh_skipped_when_token_is_fresh():
     """Token good for 24h, headroom is 30s → no refresh needed for many ticks."""
     kis = _FakeKisClientForRefresh(expires_in_seconds=86400.0)
-    loop = _TokenRefreshLoop(kis, headroom_seconds=30.0, interval_seconds=0.05)
+    loop = _TokenRefreshLoop(cast(_KisClient, kis), headroom_seconds=30.0, interval_seconds=0.05)
     await loop.start()
     await asyncio.sleep(0.5)  # ~10 ticks
     await loop.stop()
@@ -247,7 +249,7 @@ async def test_refresh_skipped_when_token_is_fresh():
 async def test_refresh_loop_survives_kis_auth_failures():
     """Two transient failures, then success — loop must not die after first failure."""
     kis = _FakeKisClientForRefresh(expires_in_seconds=5.0, fail_n_times=2)
-    loop = _TokenRefreshLoop(kis, headroom_seconds=30.0, interval_seconds=0.05)
+    loop = _TokenRefreshLoop(cast(_KisClient, kis), headroom_seconds=30.0, interval_seconds=0.05)
     await loop.start()
     # Wait for the loop to push past the failures and land a success.
     for _ in range(100):
@@ -262,7 +264,7 @@ async def test_refresh_loop_survives_kis_auth_failures():
 async def test_refresh_treats_no_expiry_as_needs_refresh():
     """If we somehow lost the expiry timestamp, a refresh must be triggered."""
     kis = _FakeKisClientForRefresh(expires_in_seconds=None)
-    loop = _TokenRefreshLoop(kis, headroom_seconds=30.0, interval_seconds=0.05)
+    loop = _TokenRefreshLoop(cast(_KisClient, kis), headroom_seconds=30.0, interval_seconds=0.05)
     await loop.start()
     for _ in range(50):
         if loop.refresh_count >= 1:
@@ -275,7 +277,7 @@ async def test_refresh_treats_no_expiry_as_needs_refresh():
 async def test_refresh_loop_stops_cleanly_mid_sleep():
     """stop() during the inter-tick sleep must cancel + return promptly."""
     kis = _FakeKisClientForRefresh(expires_in_seconds=86400.0)
-    loop = _TokenRefreshLoop(kis, headroom_seconds=30.0, interval_seconds=10.0)
+    loop = _TokenRefreshLoop(cast(_KisClient, kis), headroom_seconds=30.0, interval_seconds=10.0)
     await loop.start()
     await asyncio.sleep(0.1)  # ensure we're INSIDE the long sleep
     # Should not hang for 10s.
@@ -287,9 +289,11 @@ async def test_publisher_exposes_refresh_metrics():
     """KisPublisher's lifetime metrics must include refresh + failure counts."""
     captured: list[tuple[str, str]] = []
     fake_kis = _FakeKisClient(ticks=[])
-    pub = KisPublisher(_make_redis(captured), fake_kis, ["005930"],
-                        refresh_headroom_seconds=30.0,
-                        refresh_interval_seconds=0.05)
+    pub = KisPublisher(
+        _make_redis(captured), cast(_KisClient, fake_kis), ["005930"],
+        refresh_headroom_seconds=30.0,
+        refresh_interval_seconds=0.05,
+    )
     await pub.start()
     await asyncio.sleep(0)
     assert pub.refresh_count == 0

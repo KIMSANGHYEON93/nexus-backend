@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from dotenv import load_dotenv  # type: ignore[import-not-found]
+    from dotenv import load_dotenv
     _env_path = Path(__file__).resolve().parents[2] / ".env"
     if _env_path.is_file():
         load_dotenv(_env_path, override=False)
@@ -77,7 +77,7 @@ async def test_live_full_pipeline_subscribe_to_publish(
     assert client.state is KisConnectionState.CONNECTED
 
     # Capture sink — what KisPublisher would send to Redis.
-    captured: list[tuple[str, dict]] = []
+    captured: list[tuple[str, dict[str, object]]] = []
 
     async def consume_until(timeout_s: float, max_ticks: int = 5) -> None:
         """Pull from stream_ticks() for up to `timeout_s`, normalizing each
@@ -121,9 +121,10 @@ async def test_live_full_pipeline_subscribe_to_publish(
         round_trip = json.loads(json.dumps(payload))
         assert round_trip == payload
 
+    ack_msg_cd = getattr(ack, "msg_cd", "?") if ack else "?"
     print(
         f"\n[KIS PIPELINE OK] env={settings.kis_env} "
-        f"subscribe_ack={ack.msg_cd if ack else '?'} "
+        f"subscribe_ack={ack_msg_cd} "
         f"krx_open={krx_open} "
         f"ticks_captured={len(captured)}",
         file=sys.stderr,
@@ -138,4 +139,7 @@ async def test_live_full_pipeline_subscribe_to_publish(
         )
 
     await client.close()
-    assert client.state is KisConnectionState.DISCONNECTED
+    # Assert via .value to bypass mypy's narrowed-Literal carry-through from
+    # the earlier `is CONNECTED` assertion. Equality check on .value is
+    # equivalent at runtime.
+    assert client.state.value == "disconnected"

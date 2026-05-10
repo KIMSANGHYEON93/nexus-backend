@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -38,6 +39,13 @@ import redis.asyncio as redis
 from ..domain.market.models import Tick
 from .kis_client import KisClient, KisError
 from .redis_pubsub import CHANNEL_TICK
+
+
+# Sprint 5h: optional async observer fired once per parsed tick. Wired by
+# the PublisherSupervisor to feed the trading pipeline (context+coord+
+# guards+executor). Type alias kept here so MockPublisher can re-use it
+# unchanged when failover swaps publishers.
+TickObserver = Callable[[Tick], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -201,10 +209,12 @@ class KisPublisher:
         *,
         refresh_headroom_seconds: float = _DEFAULT_REFRESH_HEADROOM_S,
         refresh_interval_seconds: float = _DEFAULT_REFRESH_INTERVAL_S,
+        on_tick: TickObserver | None     = None,
     ) -> None:
         self._client     = client
         self._kis        = kis_client
         self._symbols    = list(symbols)
+        self._on_tick    = on_tick
         self._task: asyncio.Task[None] | None = None
         self._published: int = 0
         # Token refresh runs as a sibling task — independent of the
@@ -277,6 +287,18 @@ class KisPublisher:
                 payload = json.dumps(_tick_to_wire(tick))
                 await self._client.publish(CHANNEL_TICK, payload)
                 self._published += 1
+                # Sprint 5h: notify the trading pipeline observer (if wired).
+                # Errors inside the observer are swallowed so a misbehaving
+                # agent or guard never breaks the upstream tick stream —
+                # the pipeline has its own internal exception logging.
+                if self._on_tick is not None:
+                    try:
+                        await self._on_tick(tick)
+                    except Exception:
+                        logger.exception(
+                            "kis publisher on_tick observer raised",
+                            extra={"event": "kis_publisher_on_tick_error"},
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:

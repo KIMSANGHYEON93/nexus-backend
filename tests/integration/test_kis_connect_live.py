@@ -21,11 +21,12 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 try:
-    from dotenv import load_dotenv  # type: ignore[import-not-found]
+    from dotenv import load_dotenv
     _env_path = Path(__file__).resolve().parents[2] / ".env"
     if _env_path.is_file():
         load_dotenv(_env_path, override=False)
@@ -80,11 +81,11 @@ async def test_live_kis_websocket_handshake(caplog: pytest.LogCaptureFixture) ->
 
     # ── Stage 1: REST auth ─────────────────────────────────────────────
     await client.authenticate()
-    assert client.state is KisConnectionState.AUTHENTICATED
+    assert client.state.value == "authenticated"
 
     # ── Stage 2: Approval + WS open ────────────────────────────────────
     await client.connect()
-    assert client.state is KisConnectionState.CONNECTED
+    assert client.state.value == "connected"
     assert client.approval_key is not None
     assert client.is_ws_open is True
     assert client._ws is not None  # noqa: SLF001 — test introspection
@@ -106,7 +107,7 @@ async def test_live_kis_websocket_handshake(caplog: pytest.LogCaptureFixture) ->
     # KIS may push a PINGPONG or similar before the subscribe ack;
     # accept any frame whose body's msg1 contains "SUBSCRIBE" or whose
     # msg_cd is OPSP0000 (subscribe success code).
-    ack_payload: dict | None = None
+    ack_payload: dict[str, Any] | None = None
     deadline = asyncio.get_event_loop().time() + 5.0
     while asyncio.get_event_loop().time() < deadline:
         try:

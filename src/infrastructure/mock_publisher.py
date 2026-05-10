@@ -19,12 +19,21 @@ import asyncio
 import json
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import redis.asyncio as redis
 
+from ..domain.market.models import Tick, TickSide
 from .redis_pubsub import CHANNEL_TICK
+
+
+# Sprint 5h: shared TickObserver alias — same shape as KisPublisher's,
+# so the supervisor can hand the same observer to either publisher
+# without conditional code.
+TickObserver = Callable[[Tick], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +70,25 @@ _BASE_PRICES: dict[str, float] = {
 PUBLISH_INTERVAL_S: float = 0.5
 """Mean cadence — 2 ticks/sec aggregate across all 12 symbols."""
 
+
+def _dict_to_tick(d: dict[str, Any]) -> Tick:
+    """Wire-dict → domain Tick for handing to the trading-pipeline observer.
+
+    Mirror inverse of `_tick_to_wire()` in kis_publisher: parses the same
+    five fields back into a Pydantic Tick. Unknown side strings default to
+    BUY rather than raising — the observer chain shouldn't crash on a
+    malformed mock tick (defensive; mocks shouldn't produce them).
+    """
+    side_str = str(d.get("side", "buy")).lower()
+    side = TickSide.SELL if side_str == "sell" else TickSide.BUY
+    return Tick(
+        symbol = str(d["symbol"]),
+        ts     = datetime.fromisoformat(str(d["ts"])),
+        price  = Decimal(str(d["price"])),
+        volume = int(d["volume"]),
+        side   = side,
+    )
+
 DRIFT_STD: float = 0.002
 """Per-step lognormal drift std (~0.2%). Tuned so a 60-tick window ~3 σ
 band aligns with the frontend anomaly detector's calibration."""
@@ -74,8 +102,14 @@ class MockPublisher:
     idempotent — useful when lifespan re-entry happens during HMR.
     """
 
-    def __init__(self, client: redis.Redis) -> None:
-        self._client = client
+    def __init__(
+        self,
+        client: redis.Redis,
+        *,
+        on_tick: TickObserver | None = None,
+    ) -> None:
+        self._client  = client
+        self._on_tick = on_tick
         self._task: asyncio.Task[None] | None = None
         self._prices: dict[str, float] = dict(_BASE_PRICES)
         self._published: int = 0
@@ -119,10 +153,21 @@ class MockPublisher:
     async def _run(self) -> None:
         try:
             while True:
-                tick = self._next_tick()
-                payload = json.dumps(tick)
+                tick_dict = self._next_tick()
+                payload = json.dumps(tick_dict)
                 await self._client.publish(CHANNEL_TICK, payload)
                 self._published += 1
+                # Sprint 5h: feed the trading pipeline (if observer wired).
+                # Convert the wire dict back to a Tick so the observer
+                # signature is identical to the KisPublisher path.
+                if self._on_tick is not None:
+                    try:
+                        await self._on_tick(_dict_to_tick(tick_dict))
+                    except Exception:
+                        logger.exception(
+                            "mock publisher on_tick observer raised",
+                            extra={"event": "mock_publisher_on_tick_error"},
+                        )
                 await asyncio.sleep(PUBLISH_INTERVAL_S)
         except asyncio.CancelledError:
             raise
@@ -141,7 +186,7 @@ class MockPublisher:
 
         Floor at 1.0 KRW guards against pathological drift sequences that
         could otherwise drive a price negative in a long-running session.
-        """
+        """  # noqa: D401
         symbol = random.choice(_SEEDED_TICKERS)
         drift = random.gauss(0.0, 1.0) * DRIFT_STD
         self._prices[symbol] = max(1.0, self._prices[symbol] * (1.0 + drift))

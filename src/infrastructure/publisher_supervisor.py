@@ -37,7 +37,7 @@ import redis.asyncio as redis
 
 from ..core.config import Settings
 from .kis_client import KisClient, KisError
-from .kis_publisher import KisPublisher
+from .kis_publisher import KisPublisher, TickObserver
 from .mock_publisher import MockPublisher
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,19 @@ class PublisherSupervisor:
         with the reason captured.
     """
 
-    def __init__(self, redis_client: redis.Redis, settings: Settings) -> None:
+    def __init__(
+        self,
+        redis_client: redis.Redis,
+        settings:     Settings,
+        *,
+        on_tick:      TickObserver | None = None,
+    ) -> None:
+        # `on_tick` is the Sprint 5h trading-pipeline hook. Wired by main.py
+        # to whichever publisher comes up; survives KIS→mock failover so the
+        # pipeline keeps reasoning even when synthetic data is in flight.
         self._redis    = redis_client
         self._settings = settings
+        self._on_tick  = on_tick
         self._active: _PublisherLike | None     = None
         self._kis_client: KisClient | None      = None
         self._watchdog: asyncio.Task[None] | None = None
@@ -161,6 +171,7 @@ class PublisherSupervisor:
             self._redis,
             kis_client,
             self._settings.kis_subscribe_symbol_list,
+            on_tick=self._on_tick,
         )
         await publisher.start()
         self._kis_client = kis_client
@@ -176,7 +187,7 @@ class PublisherSupervisor:
         return True
 
     async def _start_mock(self, *, reason: str) -> None:
-        publisher = MockPublisher(self._redis)
+        publisher = MockPublisher(self._redis, on_tick=self._on_tick)
         await publisher.start()
         self._active = publisher
         logger.info(

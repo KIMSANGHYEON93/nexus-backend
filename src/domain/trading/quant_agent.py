@@ -129,7 +129,9 @@ class QuantAgent:
         window = prices[-(period + 1):]
         gains  = 0.0
         losses = 0.0
-        for prev, curr in zip(window, window[1:], strict=True):
+        # Pairwise consecutive: window[1:] is intentionally one shorter,
+        # so strict=False (pair count = len(window) - 1 = period).
+        for prev, curr in zip(window, window[1:], strict=False):
             change = curr - prev
             if change > 0:
                 gains += change
