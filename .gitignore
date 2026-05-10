@@ -29,3 +29,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Docker — local-machine port/volume overrides only, never committed
+docker-compose.override.yml
+docker-compose.override.yaml

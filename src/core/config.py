@@ -58,6 +58,22 @@ class Settings(BaseSettings):
     # the executor to do its job without baking in opinions on size.
     default_order_quantity: int = 1
 
+    # ── MacroAgent LLM provider (Sprint 5i — Open Q1 resolved) ─────────
+    # `none` keeps the Sprint 5h safe-stub behavior (MacroAgent emits HOLD@0
+    # without any external HTTP). Setting `openai` or `anthropic` activates
+    # the real LLM call — the agent still falls back to HOLD@0 on any
+    # third-party failure, so a provider outage cannot crash the pipeline.
+    #
+    # CRITICAL: `llm_api_key` is a SECRET. Like ALLOW_LIVE_ORDERS, it is
+    # deliberately absent from `.env.example` so no committed file can
+    # leak the key shape. Operators set it once on the deploy cluster.
+    llm_provider: Literal["none", "openai", "anthropic"] = "none"
+    llm_api_key:  str = ""
+    # Empty `llm_model` lets the LLM client pick a sensible default per
+    # provider (Haiku for Anthropic, gpt-4o-mini for OpenAI). Override
+    # per-deploy for cost/latency tuning.
+    llm_model:    str = ""
+
     # ── Microsoft Entra ID (OIDC) ──────────────────────────────────────
     entra_tenant_id: str = ""
     entra_client_id: str = ""

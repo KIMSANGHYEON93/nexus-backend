@@ -35,6 +35,7 @@ from .domain.trading.guardrails import (
     MaxPositionSizeGuard,
     VolatilityCircuitBreaker,
 )
+from .domain.trading.llm_client import build_llm_client
 from .domain.trading.macro_agent import MacroAgent, MockNewsProvider
 from .domain.trading.models import Action
 from .domain.trading.pipeline import TradingPipeline
@@ -123,8 +124,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     portfolio = Portfolio()
     coordinator = TradingCoordinator()
     coordinator.register(QuantAgent(context=tick_context))
+    # MacroAgent: LLM client built from settings — None when llm_provider="none"
+    # or api_key empty (Sprint 5h stub mode preserved). Real provider wired
+    # when configured; the agent falls back to HOLD@0 on any LLM failure.
+    llm_client = build_llm_client(
+        provider=settings.llm_provider,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+    )
     coordinator.register(MacroAgent(
-        context=tick_context, news_provider=MockNewsProvider(),
+        context=tick_context,
+        news_provider=MockNewsProvider(),
+        llm_client=llm_client,
     ))
     guards = GuardrailPipeline([
         MaxPositionSizeGuard(max_shares=1000),
