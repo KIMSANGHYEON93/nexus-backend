@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # per-deploy for cost/latency tuning.
     llm_model:    str = ""
 
+    # ── MacroAgent news provider (Sprint 5j) ───────────────────────────
+    # `none` keeps the MockNewsProvider stub from Sprint 5h. `google_rss`
+    # activates the real Google News RSS fetcher (no API key needed).
+    # Cache TTL caps the per-symbol fetch frequency — at 12 symbols × 600s
+    # the upper bound is ~120 fetches/hour even if every tick triggered a
+    # cache miss (which it never will once warmed up).
+    news_provider:           Literal["none", "google_rss"] = "none"
+    news_cache_ttl_seconds:  float = 600.0    # 10 minutes
+
     # ── Microsoft Entra ID (OIDC) ──────────────────────────────────────
     entra_tenant_id: str = ""
     entra_client_id: str = ""

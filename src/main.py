@@ -42,6 +42,7 @@ from .domain.trading.pipeline import TradingPipeline
 from .domain.trading.portfolio import Portfolio
 from .domain.trading.quant_agent import QuantAgent
 from .infrastructure.database import close_pool, init_pool, verify_schema
+from .infrastructure.news_provider import build_news_provider
 from .infrastructure.publisher_supervisor import PublisherSupervisor
 from .infrastructure.redis_pubsub import close_client, get_client, init_client
 
@@ -124,17 +125,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     portfolio = Portfolio()
     coordinator = TradingCoordinator()
     coordinator.register(QuantAgent(context=tick_context))
-    # MacroAgent: LLM client built from settings — None when llm_provider="none"
-    # or api_key empty (Sprint 5h stub mode preserved). Real provider wired
-    # when configured; the agent falls back to HOLD@0 on any LLM failure.
+    # MacroAgent collaborators:
+    #   • llm_client (Sprint 5i)  — None when provider="none" or key empty,
+    #     keeping the safe HOLD@0 stub. Otherwise OpenAI / Anthropic.
+    #   • news_provider (Sprint 5j) — None when provider="none", in which
+    #     case we fall back to MockNewsProvider with placeholder headlines.
+    #     `google_rss` returns a CachingNewsProvider wrapping the real RSS
+    #     fetcher (TTL via news_cache_ttl_seconds).
     llm_client = build_llm_client(
         provider=settings.llm_provider,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
+    news_provider = build_news_provider(
+        provider=settings.news_provider,
+        cache_ttl_seconds=settings.news_cache_ttl_seconds,
+    ) or MockNewsProvider()
     coordinator.register(MacroAgent(
         context=tick_context,
-        news_provider=MockNewsProvider(),
+        news_provider=news_provider,
         llm_client=llm_client,
     ))
     guards = GuardrailPipeline([
