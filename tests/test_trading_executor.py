@@ -294,3 +294,124 @@ def test_forbids_calls_client_satisfies_order_client_protocol():
     """Even the test sentinel honors the contract — proves there's no
     secret way to slip a non-conforming client past the executor."""
     assert isinstance(_ForbidsCallsClient(), OrderClient)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#                  Sprint 5k — sizer integration in executor
+# ════════════════════════════════════════════════════════════════════════
+
+from src.domain.trading.sizer import ConfidenceLinearSizer, FixedSizer  # noqa: E402
+
+
+async def test_executor_default_sizer_preserves_default_quantity_behavior():
+    """No explicit sizer → behaves identically to pre-Sprint-5k executor."""
+    client = _RecordingClient()
+    executor = OrderExecutor(
+        order_client=client, allow_live_orders=True, default_quantity=4,
+    )
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=0.95)))
+    assert client.calls[0]["quantity"] == 4
+
+
+async def test_executor_uses_injected_sizer_quantity():
+    """When a sizer is injected, the sizer's verdict drives the order size,
+    NOT default_quantity."""
+    client = _RecordingClient()
+    executor = OrderExecutor(
+        order_client=client,
+        allow_live_orders=True,
+        default_quantity=99,    # would be ignored
+        sizer=FixedSizer(7),
+    )
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=0.5)))
+    assert client.calls[0]["quantity"] == 7
+
+
+async def test_executor_with_linear_sizer_scales_by_confidence():
+    """High-confidence signal → larger order; low-confidence → smaller."""
+    client = _RecordingClient()
+    executor = OrderExecutor(
+        order_client=client,
+        allow_live_orders=True,
+        sizer=ConfidenceLinearSizer(min_quantity=1, max_quantity=100),
+    )
+    # confidence=1.0 → max
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=1.0)))
+    # confidence=0.5 → midpoint
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=0.5)))
+    # confidence=0.05 → near min
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=0.05)))
+
+    quantities = [c["quantity"] for c in client.calls]
+    assert quantities[0] == 100
+    assert quantities[1] == round(1 + 99 * 0.5)   # 50 or 51, formula-pinned
+    assert quantities[2] < quantities[1] < quantities[0], (
+        "linear sizer must produce monotonically increasing quantity with confidence"
+    )
+
+
+async def test_executor_zero_size_from_sizer_is_noop_no_client_call():
+    """ConfidenceLinearSizer below its floor returns 0 → executor MUST
+    short-circuit BEFORE any client call (regardless of safety switch)."""
+    forbidder = _ForbidsCallsClient()
+    executor = OrderExecutor(
+        order_client=forbidder,
+        allow_live_orders=True,    # even live mode
+        sizer=ConfidenceLinearSizer(
+            min_quantity=1, max_quantity=10, min_confidence=0.5,
+        ),
+    )
+    # confidence=0.2 is below the 0.5 floor → sizer returns 0 → noop
+    result = await executor.execute(_allowed(_signal(action=Action.BUY, score=0.2)))
+    assert result.mode == "noop"
+    assert result.executed is False
+    assert result.intended_quantity == 0
+    assert "sizer returned 0" in (result.reason or "")
+    assert forbidder.call_count == 0, "sizer-zero must NOT reach the order client"
+
+
+async def test_executor_zero_size_in_shadow_mode_also_noop_not_shadow():
+    """Sizer-zero short-circuits BEFORE the safety switch — distinguishes
+    "we decided not to trade" from "switch held us back"."""
+    executor = OrderExecutor(
+        order_client=_RecordingClient(),
+        allow_live_orders=False,   # shadow mode
+        sizer=ConfidenceLinearSizer(
+            min_quantity=1, max_quantity=10, min_confidence=0.5,
+        ),
+    )
+    result = await executor.execute(_allowed(_signal(action=Action.BUY, score=0.1)))
+    # mode=noop (not "shadow") because sizer skipped before we got there
+    assert result.mode == "noop"
+    assert result.intended_quantity == 0
+
+
+async def test_executor_sizer_property_exposes_injected_sizer():
+    sizer = FixedSizer(3)
+    executor = OrderExecutor(
+        order_client=_RecordingClient(), allow_live_orders=False, sizer=sizer,
+    )
+    assert executor.sizer is sizer
+
+
+async def test_executor_sizer_called_with_effective_signal_not_intended():
+    """Guard-blocked signal has effective_signal.action=HOLD, which the
+    executor short-circuits BEFORE the sizer. So a sizer NEVER sees a
+    HOLD action — verify that contract."""
+    sizer_calls: list[Action] = []
+
+    class _SpySizer:
+        def size_for(self, signal):  # noqa: ANN001, ANN201
+            sizer_calls.append(signal.action)
+            return 1
+
+    executor = OrderExecutor(
+        order_client=_RecordingClient(), allow_live_orders=True,
+        sizer=_SpySizer(),
+    )
+    # blocked signal (effective HOLD) — sizer should NOT be consulted
+    await executor.execute(_blocked(_signal(action=Action.BUY, score=0.9)))
+    assert sizer_calls == [], "sizer must not be called for HOLD/blocked signals"
+    # real BUY — sizer IS consulted
+    await executor.execute(_allowed(_signal(action=Action.BUY, score=0.6)))
+    assert sizer_calls == [Action.BUY]

@@ -309,9 +309,11 @@ async def test_cache_per_symbol_isolation():
 async def test_cache_expires_after_ttl_and_refetches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compress timeline by patching `time.monotonic` in the news_provider
     module so we don't actually have to sleep."""
-    from src.infrastructure import news_provider as np_module
     fake_now = [1000.0]
-    monkeypatch.setattr(np_module.time, "monotonic", lambda: fake_now[0])
+    monkeypatch.setattr(
+        "src.infrastructure.news_provider.time.monotonic",
+        lambda: fake_now[0],
+    )
 
     inner = _CountingProvider(per_symbol={"005930": ["v1"]})
     cache = CachingNewsProvider(inner, ttl_seconds=60.0)
@@ -385,9 +387,11 @@ async def test_cache_returns_stale_data_when_inner_returns_empty(
     """First fetch succeeds → cache populated. TTL elapses → next call
     fires inner which now returns []. Cache should serve the stale data
     rather than empty."""
-    from src.infrastructure import news_provider as np_module
     fake_now = [1000.0]
-    monkeypatch.setattr(np_module.time, "monotonic", lambda: fake_now[0])
+    monkeypatch.setattr(
+        "src.infrastructure.news_provider.time.monotonic",
+        lambda: fake_now[0],
+    )
 
     inner = _CountingProvider(per_symbol={"005930": ["good news"]})
     cache = CachingNewsProvider(inner, ttl_seconds=60.0)
@@ -410,9 +414,11 @@ async def test_cache_returns_stale_data_when_inner_raises(
 ) -> None:
     """Defensive — even if a future provider impl raises (instead of
     returning [] like RSS does), cache must catch + serve stale."""
-    from src.infrastructure import news_provider as np_module
     fake_now = [1000.0]
-    monkeypatch.setattr(np_module.time, "monotonic", lambda: fake_now[0])
+    monkeypatch.setattr(
+        "src.infrastructure.news_provider.time.monotonic",
+        lambda: fake_now[0],
+    )
 
     inner = _CountingProvider(per_symbol={"005930": ["good news"]})
     cache = CachingNewsProvider(inner, ttl_seconds=60.0)

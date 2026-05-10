@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.v1.router import router as v1_router
 from .api.websockets.stream import router as ws_router
-from .core.config import get_settings
+from .core.config import Settings, get_settings
 from .core.exception_handlers import install as install_exception_handlers
 from .core.logging import configure_logging
 from .core.middleware import RequestIdMiddleware
@@ -41,6 +41,7 @@ from .domain.trading.models import Action
 from .domain.trading.pipeline import TradingPipeline
 from .domain.trading.portfolio import Portfolio
 from .domain.trading.quant_agent import QuantAgent
+from .domain.trading.sizer import ConfidenceLinearSizer, FixedSizer, PositionSizer
 from .infrastructure.database import close_pool, init_pool, verify_schema
 from .infrastructure.news_provider import build_news_provider
 from .infrastructure.publisher_supervisor import PublisherSupervisor
@@ -52,6 +53,21 @@ from .infrastructure.redis_pubsub import close_client, get_client, init_client
 # re-applies it once settings are fully resolved.
 _bootstrap_settings = get_settings()
 configure_logging(level=_bootstrap_settings.log_level)
+
+
+def _build_sizer(settings: Settings) -> PositionSizer:
+    """Settings → PositionSizer. `fixed` (default) yields the pre-Sprint-5k
+    behavior; `linear` enables confidence-driven sizing between
+    `min_order_quantity` and `max_order_quantity`, with an optional
+    `min_order_confidence` floor below which the executor skips the trade.
+    """
+    if settings.position_sizer == "linear":
+        return ConfidenceLinearSizer(
+            min_quantity   = settings.min_order_quantity,
+            max_quantity   = settings.max_order_quantity,
+            min_confidence = settings.min_order_confidence,
+        )
+    return FixedSizer(settings.default_order_quantity)
 
 
 class _NoopOrderClient:
@@ -151,10 +167,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         CoolDownGuard(cooldown_seconds=60.0),
         VolatilityCircuitBreaker(),
     ])
+    sizer = _build_sizer(settings)
     executor = OrderExecutor(
         order_client=_NoopOrderClient(),
         allow_live_orders=settings.allow_live_orders,
         default_quantity=settings.default_order_quantity,
+        sizer=sizer,
     )
     trading_pipeline = TradingPipeline(
         context=tick_context, coordinator=coordinator, guardrails=guards,

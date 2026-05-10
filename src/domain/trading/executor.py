@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from .guardrails import GuardedSignal
 from .models import Action
+from .sizer import FixedSizer, PositionSizer
 
 logger = logging.getLogger(__name__)
 
@@ -120,18 +121,29 @@ class OrderExecutor:
         order_client:     OrderClient,
         allow_live_orders: bool,
         default_quantity: int = 1,
+        sizer:            PositionSizer | None = None,
     ) -> None:
-        if default_quantity <= 0:
-            raise ValueError(
-                f"default_quantity must be > 0, got {default_quantity}"
-            )
+        # Backward compat: pre-Sprint-5k callers passed only `default_quantity`
+        # and got fixed-size orders. Preserve that path by wrapping the int
+        # in a FixedSizer when no explicit sizer is provided.
+        if sizer is None:
+            if default_quantity <= 0:
+                raise ValueError(
+                    f"default_quantity must be > 0, got {default_quantity}"
+                )
+            sizer = FixedSizer(default_quantity)
         self._order_client      = order_client
         self._allow_live_orders = bool(allow_live_orders)
         self._default_quantity  = default_quantity
+        self._sizer             = sizer
 
     @property
     def allow_live_orders(self) -> bool:
         return self._allow_live_orders
+
+    @property
+    def sizer(self) -> PositionSizer:
+        return self._sizer
 
     async def execute(self, guarded: GuardedSignal) -> ExecutionResult:
         effective = guarded.effective_signal
@@ -157,7 +169,31 @@ class OrderExecutor:
                 ts=now,
             )
 
-        quantity = self._default_quantity
+        # ── Sizer (Sprint 5k): may return 0 to mean "skip this trade" —
+        # e.g. ConfidenceLinearSizer below its min_confidence floor. We
+        # treat 0 as a noop with reason="sizer_zero" and never reach the
+        # safety switch / broker call. Negative or surprise values get
+        # clamped defensively (a buggy sizer shouldn't be able to invert
+        # the meaning of the order or short-sell unintentionally).
+        quantity = int(self._sizer.size_for(effective))
+        if quantity <= 0:
+            logger.info(
+                "executor.noop",
+                extra={
+                    "event":    "executor_noop",
+                    "symbol":   symbol,
+                    "reason":   "sizer_zero",
+                    "sizer":    type(self._sizer).__name__,
+                    "confidence": round(effective.confidence, 4),
+                },
+            )
+            return ExecutionResult(
+                mode="noop", executed=False,
+                intended_action=action, intended_symbol=symbol,
+                intended_quantity=0,
+                reason="sizer returned 0 — confidence below floor",
+                ts=now,
+            )
 
         # ── SAFETY SWITCH OFF — log + return WITHOUT touching the client.
         # WARNING level (not INFO) so dashboards highlight that real

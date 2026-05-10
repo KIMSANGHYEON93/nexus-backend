@@ -53,10 +53,20 @@ class Settings(BaseSettings):
     # config change in the system; treat any commit that touches it as
     # production-impact + audit-required.
     allow_live_orders: bool = False
-    # Fixed order size used until Sprint 5h adds confidence-driven sizing.
-    # Per-symbol overrides come later; one global default is enough for
-    # the executor to do its job without baking in opinions on size.
+    # Default fixed quantity — used directly by `position_sizer="fixed"`
+    # AND as the lower bound for the linear sizer when not overridden
+    # via `min_order_quantity`.
     default_order_quantity: int = 1
+
+    # ── Sprint 5k position sizing ──────────────────────────────────────
+    # `fixed`  — every order is `default_order_quantity` shares
+    # `linear` — quantity = round(min + (max - min) × signal.confidence),
+    #            with `min_order_confidence` floor (signals below that
+    #            confidence are sized to 0 and skipped by the executor).
+    position_sizer:        Literal["fixed", "linear"] = "fixed"
+    min_order_quantity:    int   = 1
+    max_order_quantity:    int   = 10
+    min_order_confidence:  float = 0.0    # 0 = trade any non-HOLD signal
 
     # ── MacroAgent LLM provider (Sprint 5i — Open Q1 resolved) ─────────
     # `none` keeps the Sprint 5h safe-stub behavior (MacroAgent emits HOLD@0
