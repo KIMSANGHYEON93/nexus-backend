@@ -22,6 +22,10 @@ from ..core.config import Settings
 CHANNEL_TICK = "nexus.market.tick"
 CHANNEL_QUOTE = "nexus.market.quote"
 CHANNEL_ANOMALY = "nexus.analysis.anomaly"
+# Sprint 5m: every TradingPipeline decision lands here as a JSON envelope
+# (action + confidence + score + executor outcome). Consumed by the
+# PersistenceWorker for the execution_audit hypertable.
+CHANNEL_AUDIT = "nexus.trading.audit"
 
 
 _client: redis.Redis | None = None

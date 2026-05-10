@@ -42,10 +42,14 @@ from .domain.trading.pipeline import TradingPipeline
 from .domain.trading.portfolio import Portfolio
 from .domain.trading.quant_agent import QuantAgent
 from .domain.trading.sizer import ConfidenceLinearSizer, FixedSizer, PositionSizer
-from .infrastructure.database import close_pool, init_pool, verify_schema
+from .infrastructure.audit_publisher import make_audit_publisher
+from .infrastructure.database import close_pool, get_pool, init_pool, verify_schema
+from .infrastructure.execution_repository import ExecutionRepository
 from .infrastructure.news_provider import build_news_provider
+from .infrastructure.persistence_worker import PersistenceWorker
 from .infrastructure.publisher_supervisor import PublisherSupervisor
 from .infrastructure.redis_pubsub import close_client, get_client, init_client
+from .infrastructure.tick_repository import TickRepository
 
 
 # Configure logging at import time so module-load messages also flow
@@ -175,9 +179,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         default_quantity=settings.default_order_quantity,
         sizer=sizer,
     )
+    # Sprint 5m: hot-path-safe audit publisher. Pipeline calls this after
+    # every executor invocation; the PersistenceWorker (started below)
+    # consumes from the same Redis channel and persists to TimescaleDB.
+    audit_publisher = make_audit_publisher(get_client())
     trading_pipeline = TradingPipeline(
         context=tick_context, coordinator=coordinator, guardrails=guards,
         executor=executor, portfolio=portfolio,
+        audit_publisher=audit_publisher,
+    )
+
+    # PersistenceWorker — off-hot-path consumer of nexus.market.tick +
+    # nexus.trading.audit. Batches ticks (default flush at 500 or 5s),
+    # one-shot inserts for executions. DB outages drop batches but
+    # never crash the worker; trading hot path is fully insulated.
+    persistence_worker = PersistenceWorker(
+        get_client(),
+        TickRepository(get_pool()),
+        ExecutionRepository(get_pool()),
+    )
+    await persistence_worker.start()
+    logger.info(
+        "persistence worker armed",
+        extra={"event": "persistence_worker_armed"},
     )
 
     # ── Publisher selection + runtime failover (Sprint 5d) ─────────────
@@ -205,7 +229,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("backend shutting down")
+        # Order matters:
+        #   1. Supervisor first → stops the publisher → no new ticks flow
+        #      into the pipeline → no new audit envelopes get published.
+        #   2. PersistenceWorker → drains pending tick buffer + cancels
+        #      its Redis subscriptions before we close the Redis client.
+        #   3. Redis client.
+        #   4. DB pool LAST — repos still need it for the worker's final
+        #      drain insert.
         await supervisor.stop()
+        await persistence_worker.stop()
         await close_client()
         await close_pool()
 

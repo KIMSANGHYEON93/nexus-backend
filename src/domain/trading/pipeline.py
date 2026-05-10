@@ -4,32 +4,47 @@ Per Sprint 5h spec, the data flow is:
     tick arrives → context updated → coordinator evaluates →
     guardrails check → executor acts → portfolio updated on fill
 
-This class owns that orchestration and exposes ONE public method,
-`on_tick(tick)`, suitable for direct use as a publisher's `on_tick`
-observer hook. Errors inside the pipeline are caught and logged so they
-never propagate up into the publisher loop — a malformed tick or a
-flaky agent must not silence the live data stream.
+Sprint 5m extension: after every `executor.execute()` invocation, an
+audit envelope (signal + result) is published to a Redis channel for
+the off-hot-path PersistenceWorker to consume and persist. The publish
+is a single async send — microseconds — so the hot path stays fast
+while the database work happens entirely in a sibling task.
 
-Symmetric with the rest of the trading layer: this class imports only
-from `domain/trading/`, never from infrastructure. Wiring the right
-KisOrderClient (or paper-broker / simulator) into the executor happens
-one level up in `main.py` / `PublisherSupervisor`.
+Hot-path discipline (SPRINT 5m CRITICAL RULE):
+    DB writes MUST NOT block the trading loop. Pipeline only publishes
+    to Redis (cheap). Any DB pain stays in PersistenceWorker — its
+    repos return False/0 on error rather than raising, so even a long
+    Postgres outage cannot back-pressure the pipeline.
+
+This class imports only from `domain/trading/` for trading logic; the
+audit publish takes an optional `audit_publisher: AuditPublisher` whose
+implementation lives in infrastructure. Pre-5m callers can omit it
+(constructor default is None) to keep the older test signatures working.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from ..market.models import Tick
 from .context import TickContext
 from .coordinator import TradingCoordinator
-from .executor import OrderExecutor
-from .guardrails import GuardContext, GuardrailPipeline
-from .models import Action
+from .executor import ExecutionResult, OrderExecutor
+from .guardrails import GuardContext, GuardedSignal, GuardrailPipeline
+from .models import Action, TradeSignal
 from .portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
+
+
+# Sprint 5m: outbound port for shipping the audit envelope. The pipeline
+# fires this after every executor decision; the implementation (in
+# `infrastructure.audit_publisher`) is a one-line redis.publish. Async
+# because Redis publish is async, but it returns in microseconds — the
+# hot path is not meaningfully extended.
+AuditPublisher = Callable[[dict[str, object]], Awaitable[None]]
 
 
 class TradingPipeline:
@@ -48,7 +63,8 @@ class TradingPipeline:
         guardrails:        GuardrailPipeline,
         executor:          OrderExecutor,
         portfolio:         Portfolio,
-        volatility_window: int = 10,
+        volatility_window: int                    = 10,
+        audit_publisher:   AuditPublisher | None  = None,
     ) -> None:
         self._context           = context
         self._coordinator       = coordinator
@@ -56,9 +72,11 @@ class TradingPipeline:
         self._executor          = executor
         self._portfolio         = portfolio
         self._volatility_window = volatility_window
+        self._audit_publisher   = audit_publisher
         self._tick_count:        int = 0
         self._executed_count:    int = 0
         self._error_count:       int = 0
+        self._audit_failure_count: int = 0
 
     @property
     def tick_count(self) -> int:
@@ -71,6 +89,10 @@ class TradingPipeline:
     @property
     def error_count(self) -> int:
         return self._error_count
+
+    @property
+    def audit_failure_count(self) -> int:
+        return self._audit_failure_count
 
     async def on_tick(self, tick: Tick) -> None:
         """Suitable as a publisher.on_tick callback. Catches all
@@ -124,3 +146,62 @@ class TradingPipeline:
                 ts       = result.ts,
             )
             self._executed_count += 1
+
+        # 7. Audit publish (Sprint 5m) — async one-shot to Redis. Wrapped
+        # so a Redis hiccup never propagates back into the hot path. The
+        # PersistenceWorker on the other end will write to the
+        # execution_audit hypertable; failures THERE don't reach us either.
+        if self._audit_publisher is not None:
+            envelope = _build_audit_envelope(signal, guarded, result)
+            try:
+                await self._audit_publisher(envelope)
+            except Exception:  # noqa: BLE001 — defensive: audit must NEVER break the loop
+                self._audit_failure_count += 1
+                logger.warning(
+                    "trading.pipeline.audit_publish_failed",
+                    extra={
+                        "event":  "trading_pipeline_audit_publish_failed",
+                        "symbol": tick.symbol,
+                    },
+                )
+
+
+# ── Audit envelope construction ────────────────────────────────────────
+
+
+def _build_audit_envelope(
+    signal:  TradeSignal,
+    guarded: GuardedSignal,
+    result:  ExecutionResult,
+) -> dict[str, object]:
+    """Pack the per-decision audit row into the wire envelope consumed
+    by the PersistenceWorker → ExecutionRepository chain.
+
+    Schema is the source of truth for `db/migrations/002_execution_audit.sql`
+    columns. Adding a field here without bumping the migration means the
+    persistence layer silently drops it; bump both together.
+    """
+    return {
+        "ts":               result.ts.isoformat(),
+        "symbol":           result.intended_symbol,
+        "mode":             result.mode,
+        "executed":         result.executed,
+        "intended_action":  result.intended_action.value,
+        "intended_quantity": result.intended_quantity,
+        "order_id":         result.order_id,
+        "blocked_by":       guarded.blocked_by,
+        "reason":           result.reason,
+        "signal": {
+            "action":     signal.action.value,
+            "confidence": signal.confidence,
+            "score":      signal.score,
+            "rationale":  [
+                {
+                    "agent_id":   c.agent_id,
+                    "action":     c.action.value,
+                    "confidence": c.confidence,
+                }
+                for c in signal.contributors
+            ],
+        },
+    }
