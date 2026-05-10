@@ -56,13 +56,22 @@ def _tick(symbol: str = "005930", price: str = "79000", offset_s: int = 0) -> Ti
 
 class _MockPool:
     """asyncpg.Pool stand-in. `acquire()` returns an async context manager
-    yielding `MockConnection`. Records every executemany / execute call
-    + can be configured to raise on demand."""
+    yielding `MockConnection`. Records every executemany / execute /
+    fetch call + can be configured to raise on demand. `fetch_returns`
+    seeds the next fetch() result so read-side tests don't need a
+    different mock class."""
 
-    def __init__(self, *, raise_on: type[BaseException] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on: type[BaseException] | None = None,
+        fetch_returns: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.executemany_calls: list[tuple[str, list[Any]]] = []
         self.execute_calls:     list[tuple[str, tuple[Any, ...]]] = []
+        self.fetch_calls:       list[tuple[str, tuple[Any, ...]]] = []
         self._raise_on = raise_on
+        self._fetch_returns = fetch_returns or []
 
     def acquire(self):  # noqa: ANN201
         outer = self
@@ -84,6 +93,12 @@ class _MockPool:
         if self._raise_on is not None:
             raise self._raise_on("simulated DB error")
         self.execute_calls.append((sql, args))
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        if self._raise_on is not None:
+            raise self._raise_on("simulated DB error")
+        self.fetch_calls.append((sql, args))
+        return list(self._fetch_returns)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -214,6 +229,96 @@ async def test_execution_repo_envelope_with_fill_carries_order_id():
     args = pool.execute_calls[0][1]
     assert args[6] == "ODR-99"
     assert args[3] is True
+
+
+# ── Sprint 5o-C-3: fetch_recent (audit modal read path) ───────────────
+
+
+def _audit_row(**overrides: Any) -> dict[str, Any]:
+    """Shape what asyncpg.fetch returns for a row in execution_audit."""
+    base = {
+        "ts":                datetime(2026, 5, 11, 4, 30, 0, tzinfo=timezone.utc),
+        "symbol":            "005930",
+        "mode":              "shadow",
+        "executed":          False,
+        "intended_action":   "buy",
+        "intended_quantity": 7,
+        "order_id":          None,
+        "blocked_by":        None,
+        "reason":            "ALLOW_LIVE_ORDERS=false",
+        "signal_action":     "buy",
+        "signal_confidence": 0.65,
+        "signal_score":      0.65,
+        "signal_rationale":  json.dumps([
+            {"agent_id": "quant.rsi", "action": "buy", "confidence": 0.7},
+        ]),
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_execution_repo_fetch_recent_returns_rows_newest_first():
+    """Repo decodes asyncpg rows into dict shape + parses JSON rationale."""
+    rows = [
+        _audit_row(),
+        _audit_row(
+            ts=datetime(2026, 5, 11, 4, 25, 0, tzinfo=timezone.utc),
+            mode="noop",
+            blocked_by="cooldown",
+            reason="60s remaining",
+        ),
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = ExecutionRepository(pool)
+    out = await repo.fetch_recent("005930", limit=10)
+    assert len(out) == 2
+    assert out[0]["symbol"] == "005930"
+    assert out[0]["mode"] == "shadow"
+    # JSON rationale string is normalized to list[dict]
+    assert isinstance(out[0]["signal_rationale"], list)
+    assert out[0]["signal_rationale"][0]["agent_id"] == "quant.rsi"
+    # Pool received the limit verbatim
+    sql, args = pool.fetch_calls[0]
+    assert "FROM execution_audit" in sql
+    assert "ORDER BY ts DESC" in sql
+    assert args == ("005930", 10)
+
+
+async def test_execution_repo_fetch_recent_handles_pre_parsed_rationale():
+    """Newer asyncpg builds with JSON codecs return rationale as list
+    already — the repo must accept that shape too without re-parsing."""
+    rows = [_audit_row(signal_rationale=[
+        {"agent_id": "macro.llm", "action": "hold", "confidence": 0.4},
+    ])]
+    pool = _MockPool(fetch_returns=rows)
+    repo = ExecutionRepository(pool)
+    out = await repo.fetch_recent("000660")
+    assert out[0]["signal_rationale"][0]["agent_id"] == "macro.llm"
+
+
+async def test_execution_repo_fetch_recent_corrupt_rationale_falls_back_to_empty():
+    """A row with garbage JSON in signal_rationale should still surface in
+    the modal — empty contributors instead of dropping the row entirely."""
+    pool = _MockPool(fetch_returns=[_audit_row(signal_rationale="not json {")])
+    repo = ExecutionRepository(pool)
+    out = await repo.fetch_recent("005930")
+    assert out[0]["signal_rationale"] == []
+
+
+async def test_execution_repo_fetch_recent_db_error_returns_empty_list():
+    """Postgres / interface / OS / timeout errors all collapse to []
+    so the modal renders an empty state instead of 500-ing."""
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = ExecutionRepository(pool)
+    assert await repo.fetch_recent("005930") == []
+
+
+async def test_execution_repo_fetch_recent_zero_limit_short_circuits():
+    """Defensive guard — limit<1 must NOT issue a query at all."""
+    pool = _MockPool(fetch_returns=[_audit_row()])
+    repo = ExecutionRepository(pool)
+    assert await repo.fetch_recent("005930", limit=0) == []
+    assert pool.fetch_calls == []
 
 
 # ════════════════════════════════════════════════════════════════════════

@@ -53,6 +53,22 @@ _INSERT_AUDIT_SQL = """
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 """
 
+# Newest-first audit lookup for the ⌘L Audit modal (Sprint 5o-C-3). Backed
+# by `idx_execution_audit_symbol_ts (symbol, ts DESC)` — index-only on
+# the WHERE/ORDER pair, so the LIMIT slice is a chunk-local range scan
+# even with months of audit history.
+_FETCH_RECENT_SQL = """
+    SELECT ts, symbol, mode, executed,
+           intended_action, intended_quantity,
+           order_id, blocked_by, reason,
+           signal_action, signal_confidence, signal_score,
+           signal_rationale
+      FROM execution_audit
+     WHERE symbol = $1
+     ORDER BY ts DESC
+     LIMIT $2
+"""
+
 
 class ExecutionRepository:
     """Owner of one row insert per pipeline decision."""
@@ -97,6 +113,86 @@ class ExecutionRepository:
             )
             return False
         return True
+
+    async def fetch_recent(
+        self,
+        symbol: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Newest-first audit rows for one symbol — backs the ⌘L modal.
+
+        Returns plain dicts (not domain objects) because the audit row
+        lives only at the repository edge — there's no domain logic that
+        needs a typed wrapper. `signal_rationale` is decoded from JSONB
+        into a Python list[dict] here so the router doesn't have to know
+        about asyncpg's text-vs-decoded ambiguity (older asyncpg builds
+        hand back a JSON string, newer ones a parsed object — we
+        normalize to the parsed shape).
+
+        Read-only; never raises into the request — DB / connection errors
+        return an empty list and log so the modal renders an empty state
+        rather than 500-ing the operator. The route layer remains the
+        place to surface "service unavailable" if we need to harden this
+        later.
+        """
+        if limit < 1:
+            return []
+        try:
+            rows = await self._pool.fetch(_FETCH_RECENT_SQL, symbol, limit)
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ) as exc:
+            logger.warning(
+                "execution_repo.fetch_recent_failed",
+                extra={
+                    "event":      "execution_repo_fetch_recent_failed",
+                    "symbol":     symbol,
+                    "error_type": type(exc).__name__,
+                    "error":      str(exc)[:200],
+                },
+            )
+            return []
+        return [self._row_to_dict(r) for r in rows]
+
+    @staticmethod
+    def _row_to_dict(row: Any) -> dict[str, Any]:
+        """Normalize one asyncpg Record into the API DTO shape.
+
+        `signal_rationale` may arrive as a JSON string (older asyncpg) or
+        an already-parsed list[dict] (newer asyncpg with codec config) —
+        both paths land at the same Python shape. A malformed string
+        falls back to an empty list rather than raising; an audit row
+        with corrupt rationale should still be visible in the modal,
+        with the contributors panel empty rather than crashing the
+        whole list.
+        """
+        rationale_raw = row["signal_rationale"]
+        if isinstance(rationale_raw, str):
+            try:
+                rationale = json.loads(rationale_raw)
+            except (ValueError, TypeError):
+                rationale = []
+        elif isinstance(rationale_raw, list):
+            rationale = rationale_raw
+        else:
+            rationale = []
+        return {
+            "ts":                row["ts"],
+            "symbol":            row["symbol"],
+            "mode":              row["mode"],
+            "executed":          row["executed"],
+            "intended_action":   row["intended_action"],
+            "intended_quantity": row["intended_quantity"],
+            "order_id":          row["order_id"],
+            "blocked_by":        row["blocked_by"],
+            "reason":            row["reason"],
+            "signal_action":     row["signal_action"],
+            "signal_confidence": row["signal_confidence"],
+            "signal_score":      row["signal_score"],
+            "signal_rationale":  rationale,
+        }
 
     @staticmethod
     def _envelope_to_row(env: dict[str, Any]) -> tuple[Any, ...]:

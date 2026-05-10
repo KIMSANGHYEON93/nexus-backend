@@ -8,7 +8,7 @@ responding the old shape.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -57,3 +57,54 @@ class ReadinessDTO(BaseModel):
     database:  bool
     redis:     bool
     migration: MigrationStatusDTO
+
+
+class AuditRationaleDTO(BaseModel):
+    """One agent's contribution to a coordinator decision. Mirrors the
+    `AgentSignal`-shaped dict that the TradingCoordinator stores in the
+    audit envelope's `signal.rationale`. We keep it permissive (extra
+    fields allowed) so additions to AgentSignal don't break the modal —
+    the frontend renders agent_id + action + confidence and ignores
+    the rest until it knows about new fields."""
+
+    agent_id:    str
+    action:      str
+    confidence:  float
+
+    model_config = {"extra": "allow"}
+
+
+class AuditRowDTO(BaseModel):
+    """One row from `execution_audit` — what the coordinator decided,
+    what the executor intended, and what the broker actually did. The
+    ⌘L Audit modal renders these newest-first per symbol so an operator
+    can answer "why didn't we trade NAVER at 09:32?" or "why did we
+    flip from BUY to HOLD when the signal was 0.7 confident?".
+
+    `signal_rationale` is the per-agent contributor list — empty when
+    the row is malformed in storage (we'd rather render the row with an
+    empty rationale than drop it from the modal entirely)."""
+
+    ts:                datetime
+    symbol:            str
+    mode:              str  # 'live' | 'shadow' | 'noop'
+    executed:          bool
+    intended_action:   str  # 'buy' | 'hold' | 'sell'
+    intended_quantity: int
+    order_id:          Optional[str] = None
+    blocked_by:        Optional[str] = None
+    reason:            Optional[str] = None
+    signal_action:     str
+    signal_confidence: float
+    signal_score:      float
+    signal_rationale:  list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AuditRecentDTO(BaseModel):
+    """Response envelope for `/v1/audit/recent`. The list is wrapped in
+    an envelope so we can later add cursor pagination / total-count
+    metadata without breaking the contract — versioning a top-level
+    list shape is awkward."""
+
+    symbol: str
+    rows:   list[AuditRowDTO]

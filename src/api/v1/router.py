@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from ...core.security import Principal, get_current_user, require_principal
 from ...domain.market.repository import MarketRepository
@@ -20,8 +20,17 @@ from ...infrastructure.database import (
     get_pool,
     verify_schema,
 )
+from ...infrastructure.execution_repository import ExecutionRepository
 from ...infrastructure.redis_pubsub import get_client
-from .dto import EdgeDTO, EntityDTO, MigrationStatusDTO, ReadinessDTO, SnapshotDTO
+from .dto import (
+    AuditRecentDTO,
+    AuditRowDTO,
+    EdgeDTO,
+    EntityDTO,
+    MigrationStatusDTO,
+    ReadinessDTO,
+    SnapshotDTO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +41,11 @@ router = APIRouter(prefix="/v1", tags=["v1"])
 def _repo() -> MarketRepository:
     """Per-request repository factory. The pool itself is process-wide."""
     return MarketRepository(get_pool())
+
+
+def _audit_repo() -> ExecutionRepository:
+    """Per-request audit repository factory. Same pool, distinct table."""
+    return ExecutionRepository(get_pool())
 
 
 @router.get("/health")
@@ -129,4 +143,37 @@ async def latest_snapshot(
             for r in edges_raw
         ],
         ts=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/audit/recent", response_model=AuditRecentDTO)
+async def audit_recent(
+    audit: Annotated[ExecutionRepository, Depends(_audit_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    symbol: Annotated[str, Query(min_length=1, max_length=64,
+                                  description="Entity / KIS ticker — e.g. '005930'")],
+    limit: Annotated[int, Query(ge=1, le=200,
+                                 description="Newest-first row cap")] = 20,
+) -> AuditRecentDTO:
+    """Recent audit rows for one symbol, newest-first. Powers the ⌘L Audit
+    modal: every coordinator decision (live fill / shadow / noop / blocked)
+    surfaces with intended action, guard verdict, and the per-agent
+    rationale that produced it.
+
+    Repository read is fault-tolerant — an upstream DB hiccup yields an
+    empty list rather than a 500 so the modal renders an empty state and
+    the operator stays unblocked. A subsequent call retries cleanly. We
+    do NOT pretend "no rows" is the same as "DB down" beyond this layer:
+    the warning log on the repo side is where ops finds the actual cause.
+
+    Auth: same anonymous-OK-in-dev rule as `/v1/snapshot`.
+    """
+    logger.debug(
+        "audit served symbol=%s limit=%d to %s (tenant=%s)",
+        symbol, limit, principal.subject, principal.tenant,
+    )
+    rows = await audit.fetch_recent(symbol=symbol, limit=limit)
+    return AuditRecentDTO(
+        symbol=symbol,
+        rows=[AuditRowDTO.model_validate(r) for r in rows],
     )

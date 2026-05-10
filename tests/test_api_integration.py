@@ -44,6 +44,7 @@ def _build_mock_pool(
     schema_version: int | None = 1,
     entities: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
+    audit_rows: list[dict[str, Any]] | None = None,
     db_ping_raises: Exception | None = None,
 ) -> MagicMock:
     """Pool whose acquire().__aenter__() returns a connection. The connection
@@ -58,14 +59,16 @@ def _build_mock_pool(
     # `fetchval` is used by verify_schema() exclusively in our codebase.
     conn.fetchval = AsyncMock(return_value=schema_version)
 
-    # `fetch` is used by the repository for entities / edges. The repository
-    # itself is built per-request from the pool, so we route fetches
-    # by SQL prefix to keep tests readable.
+    # `fetch` is used by the repository for entities / edges / audit. The
+    # repository itself is built per-request from the pool, so we route
+    # fetches by SQL prefix to keep tests readable.
     async def _fetch(sql: str, *args: Any) -> list[dict[str, Any]]:
         if "FROM entity" in sql:
             return entities or []
         if "FROM edge" in sql:
             return edges or []
+        if "FROM execution_audit" in sql:
+            return audit_rows or []
         return []
     conn.fetch = AsyncMock(side_effect=_fetch)
 
@@ -281,6 +284,96 @@ def test_me_in_dev_returns_anonymous(app_with_mocks):
     assert body["tenant"] == "dev"
     assert body["roles"] == []
     assert body["scopes"] == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  /v1/audit/recent — Sprint 5o-C-3
+# ──────────────────────────────────────────────────────────────────────────
+
+import json as _json
+from datetime import datetime as _dt, timezone as _tz
+
+
+def _audit_pg_row(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "ts":                _dt(2026, 5, 11, 4, 30, 0, tzinfo=_tz.utc),
+        "symbol":            "005930",
+        "mode":              "shadow",
+        "executed":          False,
+        "intended_action":   "buy",
+        "intended_quantity": 7,
+        "order_id":          None,
+        "blocked_by":        None,
+        "reason":            "ALLOW_LIVE_ORDERS=false",
+        "signal_action":     "buy",
+        "signal_confidence": 0.65,
+        "signal_score":      0.65,
+        "signal_rationale":  _json.dumps([
+            {"agent_id": "quant.rsi", "action": "buy", "confidence": 0.7},
+        ]),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_audit_recent_empty_returns_envelope(app_with_mocks):
+    """No rows in DB → 200 with empty list (frontend renders empty state)."""
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/audit/recent?symbol=005930")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"symbol": "005930", "rows": []}
+
+
+def test_audit_recent_returns_rows_in_order(env_minimal, monkeypatch):
+    """Repository hands back two rows; envelope passes them through."""
+    rows = [
+        _audit_pg_row(),  # newer
+        _audit_pg_row(
+            ts=_dt(2026, 5, 11, 4, 25, 0, tzinfo=_tz.utc),
+            mode="noop",
+            blocked_by="cooldown",
+            reason="60s remaining",
+        ),
+    ]
+    pool = _build_mock_pool(audit_rows=rows)
+    redis_client = _build_mock_redis()
+    import src.infrastructure.database as db_mod
+    import src.infrastructure.redis_pubsub as redis_mod
+    monkeypatch.setattr(db_mod, "_pool", pool)
+    monkeypatch.setattr(redis_mod, "_client", redis_client)
+
+    body = TestClient(_build_app()).get(
+        "/v1/audit/recent?symbol=005930&limit=5"
+    ).json()
+    assert body["symbol"] == "005930"
+    assert len(body["rows"]) == 2
+    assert body["rows"][0]["mode"] == "shadow"
+    assert body["rows"][1]["mode"] == "noop"
+    assert body["rows"][1]["blocked_by"] == "cooldown"
+    # Rationale JSON parsed into list[dict] before crossing the wire
+    assert body["rows"][0]["signal_rationale"][0]["agent_id"] == "quant.rsi"
+
+
+def test_audit_recent_missing_symbol_returns_problem_json(app_with_mocks):
+    """Query param is required — FastAPI 422 must flow through the
+    RFC 7807 envelope our middleware installs."""
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/audit/recent")
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_audit_recent_limit_out_of_range_rejected(app_with_mocks):
+    """Defense-in-depth — 0 and 201 are both rejected at the FastAPI
+    layer so the repository never sees a query with no LIMIT."""
+    app, _, _ = app_with_mocks
+    assert TestClient(app).get(
+        "/v1/audit/recent?symbol=005930&limit=0"
+    ).status_code == 422
+    assert TestClient(app).get(
+        "/v1/audit/recent?symbol=005930&limit=201"
+    ).status_code == 422
 
 
 # ──────────────────────────────────────────────────────────────────────────
