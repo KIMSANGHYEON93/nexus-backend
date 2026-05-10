@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     news_provider = build_news_provider(
         provider=settings.news_provider,
         cache_ttl_seconds=settings.news_cache_ttl_seconds,
+        locales=settings.news_locales,
     ) or MockNewsProvider()
     coordinator.register(MacroAgent(
         context=tick_context,

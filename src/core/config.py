@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     # per-deploy for cost/latency tuning.
     llm_model:    str = ""
 
-    # ── MacroAgent news provider (Sprint 5j) ───────────────────────────
+    # ── MacroAgent news provider (Sprint 5j + 5l) ──────────────────────
     # `none` keeps the MockNewsProvider stub from Sprint 5h. `google_rss`
     # activates the real Google News RSS fetcher (no API key needed).
     # Cache TTL caps the per-symbol fetch frequency — at 12 symbols × 600s
@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     # cache miss (which it never will once warmed up).
     news_provider:           Literal["none", "google_rss"] = "none"
     news_cache_ttl_seconds:  float = 600.0    # 10 minutes
+    # Comma-separated locale list (Sprint 5l). Each locale gets its own
+    # cached GoogleNewsRSSProvider; when more than one is configured, the
+    # factory wraps them in a CompositeNewsProvider that merges + dedups
+    # results. Default `en` matches the prior single-source behavior.
+    # Korean equities benefit from `en,ko` because primary news is often
+    # Korean-only while secondary analysis is English.
+    news_locales:            str = "en"
 
     # ── Microsoft Entra ID (OIDC) ──────────────────────────────────────
     entra_tenant_id: str = ""

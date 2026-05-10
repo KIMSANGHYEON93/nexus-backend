@@ -477,3 +477,202 @@ def test_factory_google_rss_returns_caching_wrapper():
 def test_factory_provider_string_is_normalized():
     assert build_news_provider(provider="GOOGLE_RSS", cache_ttl_seconds=60.0) is not None
     assert build_news_provider(provider="  google_rss  ", cache_ttl_seconds=60.0) is not None
+
+
+# ════════════════════════════════════════════════════════════════════════
+#                      Sprint 5l — Multi-locale + Composite
+# ════════════════════════════════════════════════════════════════════════
+
+from src.infrastructure.news_provider import (   # noqa: E402
+    CompositeNewsProvider,
+    _parse_locale_list,
+)
+
+
+# ── Korean locale wiring on the underlying RSS provider ───────────────
+
+
+async def test_rss_provider_korean_locale_url_uses_kr_params():
+    """`news_locales=ko` configures GoogleNewsRSSProvider with KR params."""
+    p = GoogleNewsRSSProvider(hl="ko-KR", gl="KR", ceid="KR:ko")
+    url = p.build_url("005930")
+    assert "hl=ko-KR" in url
+    assert "gl=KR" in url
+    assert "ceid=KR%3Ako" in url
+    # Symbol→company map still used; English company name works as
+    # search keyword in the Korean Google News index too.
+    assert "Samsung+Electronics" in url
+
+
+# ── Locale list parsing ──────────────────────────────────────────────
+
+
+def test_locale_parser_single_token():
+    assert _parse_locale_list("en") == ["en"]
+    assert _parse_locale_list("ko") == ["ko"]
+
+
+def test_locale_parser_multiple_tokens_preserve_order():
+    assert _parse_locale_list("en,ko") == ["en", "ko"]
+    assert _parse_locale_list("ko,en,ja") == ["ko", "en", "ja"]
+
+
+def test_locale_parser_dedupes_keeping_first_occurrence():
+    assert _parse_locale_list("en,ko,en,ko") == ["en", "ko"]
+
+
+def test_locale_parser_normalizes_case_and_whitespace():
+    assert _parse_locale_list(" KO , EN ") == ["ko", "en"]
+
+
+def test_locale_parser_drops_unknown_tokens():
+    assert _parse_locale_list("en,bogus,ko") == ["en", "ko"]
+
+
+def test_locale_parser_empty_falls_back_to_english():
+    assert _parse_locale_list("") == ["en"]
+    assert _parse_locale_list("   ") == ["en"]
+    assert _parse_locale_list("bogus,unknown") == ["en"]
+
+
+# ── CompositeNewsProvider — happy paths ─────────────────────────────
+
+
+async def test_composite_merges_results_from_all_inners():
+    en = _CountingProvider(per_symbol={"005930": ["Samsung beats earnings"]})
+    ko = _CountingProvider(per_symbol={"005930": ["삼성 실적 호조"]})
+    composite = CompositeNewsProvider([en, ko])
+    out = await composite.recent_headlines("005930")
+    assert "Samsung beats earnings" in out
+    assert "삼성 실적 호조" in out
+    assert len(out) == 2
+
+
+async def test_composite_dedupes_case_insensitive_first_seen_wins():
+    """Same-case + capitalized variants of the same headline → one entry,
+    keeping whichever comes first in inner-provider order."""
+    a = _CountingProvider(per_symbol={"005930": ["Memory Pricing Firming"]})
+    b = _CountingProvider(per_symbol={"005930": ["memory pricing firming"]})
+    composite = CompositeNewsProvider([a, b])
+    out = await composite.recent_headlines("005930")
+    assert out == ["Memory Pricing Firming"]
+
+
+async def test_composite_caps_at_max_total():
+    """Even if 5 inners return 5 each, output is capped at max_total."""
+    inners = [
+        _CountingProvider(per_symbol={"005930": [f"src{i}-headline-{j}" for j in range(5)]})
+        for i in range(5)
+    ]
+    composite = CompositeNewsProvider(inners, max_total=8)
+    out = await composite.recent_headlines("005930")
+    assert len(out) == 8
+
+
+async def test_composite_calls_inners_in_parallel_not_serially():
+    """Two slow inners should finish in ~one delay, not two."""
+    started: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+    can_finish = asyncio.Event()
+
+    class _SlowInner:
+        def __init__(self, idx: int) -> None:
+            self._idx = idx
+        async def recent_headlines(self, symbol: str) -> list[str]:
+            started[self._idx].set()
+            await can_finish.wait()
+            return [f"slow-{self._idx}"]
+
+    composite = CompositeNewsProvider([_SlowInner(0), _SlowInner(1)])
+    task = asyncio.create_task(composite.recent_headlines("005930"))
+    # Both inner calls should be in flight before either completes.
+    await asyncio.wait_for(started[0].wait(), timeout=1.0)
+    await asyncio.wait_for(started[1].wait(), timeout=1.0)
+    can_finish.set()
+    out = await task
+    assert sorted(out) == ["slow-0", "slow-1"]
+
+
+# ── CompositeNewsProvider — failure isolation ───────────────────────
+
+
+async def test_composite_one_inner_failure_does_not_block_others():
+    class _Boom:
+        async def recent_headlines(self, symbol: str) -> list[str]:
+            raise RuntimeError("upstream A is down")
+
+    good = _CountingProvider(per_symbol={"005930": ["good news"]})
+    composite = CompositeNewsProvider([_Boom(), good])
+    out = await composite.recent_headlines("005930")
+    assert out == ["good news"]
+    assert composite.failure_count == 1
+
+
+async def test_composite_all_inners_failing_returns_empty_not_raise():
+    class _Boom:
+        async def recent_headlines(self, symbol: str) -> list[str]:
+            raise RuntimeError("everyone is down")
+    composite = CompositeNewsProvider([_Boom(), _Boom()])
+    out = await composite.recent_headlines("005930")
+    assert out == []
+    assert composite.failure_count == 2
+
+
+async def test_composite_inners_returning_empty_dont_count_as_failures():
+    a = _CountingProvider(default=[])
+    b = _CountingProvider(per_symbol={"005930": ["one good"]})
+    composite = CompositeNewsProvider([a, b])
+    out = await composite.recent_headlines("005930")
+    assert out == ["one good"]
+    assert composite.failure_count == 0
+
+
+# ── Construction validation ────────────────────────────────────────
+
+
+def test_composite_rejects_empty_inner_list():
+    with pytest.raises(ValueError):
+        CompositeNewsProvider([])
+
+
+def test_composite_rejects_zero_or_negative_max_total():
+    inner = _CountingProvider()
+    with pytest.raises(ValueError):
+        CompositeNewsProvider([inner], max_total=0)
+
+
+def test_composite_satisfies_news_provider_protocol():
+    inner = _CountingProvider()
+    assert isinstance(CompositeNewsProvider([inner]), NewsProvider)
+
+
+# ── Factory + locale wiring ────────────────────────────────────────
+
+
+def test_factory_single_locale_returns_caching_not_composite():
+    """One locale = no need for the composite wrapper overhead."""
+    p = build_news_provider(
+        provider="google_rss", cache_ttl_seconds=60.0, locales="ko",
+    )
+    assert isinstance(p, CachingNewsProvider)
+
+
+def test_factory_two_locales_returns_composite_of_two_caching():
+    p = build_news_provider(
+        provider="google_rss", cache_ttl_seconds=60.0, locales="en,ko",
+    )
+    assert isinstance(p, CompositeNewsProvider)
+    assert p.inner_count == 2
+
+
+def test_factory_unknown_locale_dropped_falls_back_to_english():
+    """`locales='bogus'` → no valid locales → defaults to en → single Caching."""
+    p = build_news_provider(
+        provider="google_rss", cache_ttl_seconds=60.0, locales="bogus",
+    )
+    assert isinstance(p, CachingNewsProvider)
+
+
+def test_factory_default_locale_is_english_backward_compat():
+    """No locales arg → en, identical to pre-Sprint-5l behavior."""
+    p = build_news_provider(provider="google_rss", cache_ttl_seconds=60.0)
+    assert isinstance(p, CachingNewsProvider)

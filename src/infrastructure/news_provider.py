@@ -34,6 +34,7 @@ import logging
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -325,6 +326,112 @@ class CachingNewsProvider:
         return (time.monotonic() - entry.fetched_at) < self._ttl
 
 
+# ── Multi-source aggregator (Sprint 5l) ────────────────────────────────
+
+
+class CompositeNewsProvider:
+    """Fans out to multiple inner providers in parallel, merges + dedups
+    by lowercased title.
+
+    Use case: a Korean equity's news lives partly in Korean-language
+    outlets (primary) and partly in English-language coverage of the
+    same events (secondary translation/analysis). Pulling both gives
+    the LLM analyst more context than either alone — but the duplicate
+    headlines (same event, two languages) would just inflate the prompt
+    without adding signal. The dedup step keeps the FIRST occurrence
+    seen (deterministic ordering = inner provider order at construction).
+
+    Per-source isolation: a single inner provider raising / returning []
+    NEVER prevents the others from contributing. Failure modes pile up
+    in `failure_count` for observability but don't propagate.
+    """
+
+    def __init__(
+        self,
+        inners: Sequence[NewsProvider],
+        *,
+        max_total: int = 8,
+    ) -> None:
+        if not inners:
+            raise ValueError("CompositeNewsProvider needs at least one inner provider")
+        if max_total <= 0:
+            raise ValueError(f"max_total must be > 0, got {max_total}")
+        self._inners       = list(inners)
+        self._max_total    = max_total
+        self._failure_count: int = 0
+
+    @property
+    def inner_count(self) -> int:
+        return len(self._inners)
+
+    @property
+    def failure_count(self) -> int:
+        return self._failure_count
+
+    async def recent_headlines(self, symbol: str) -> list[str]:
+        results = await asyncio.gather(
+            *[inner.recent_headlines(symbol) for inner in self._inners],
+            return_exceptions=True,
+        )
+
+        merged: list[str] = []
+        seen:   set[str]  = set()
+        for idx, result in enumerate(results):
+            if isinstance(result, BaseException):
+                self._failure_count += 1
+                logger.warning(
+                    "news.composite.inner_failed",
+                    extra={
+                        "event":      "news_composite_inner_failed",
+                        "symbol":     symbol,
+                        "inner_idx":  idx,
+                        "error_type": type(result).__name__,
+                    },
+                )
+                continue
+            for headline in result:
+                key = headline.strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(headline)
+                if len(merged) >= self._max_total:
+                    return merged
+        return merged
+
+
+# ── Locale preset table ────────────────────────────────────────────────
+# Maps short locale tokens (used in Settings.news_locales) to the
+# (hl, gl, ceid) triple that Google News RSS expects. Adding a new
+# locale is one entry — no factory changes required.
+_LOCALE_PRESETS: dict[str, tuple[str, str, str]] = {
+    "en": ("en-US", "US", "US:en"),
+    "ko": ("ko-KR", "KR", "KR:ko"),
+    "ja": ("ja-JP", "JP", "JP:ja"),
+    "zh": ("zh-CN", "CN", "CN:zh-Hans"),
+}
+
+
+def _parse_locale_list(raw: str) -> list[str]:
+    """Comma-separated, normalized, deduped (preserving order), unknowns
+    dropped + logged. Empty input falls back to ['en']."""
+    seen: set[str] = set()
+    out:  list[str] = []
+    for token in (raw or "").split(","):
+        token = token.strip().lower()
+        if not token or token in seen:
+            continue
+        if token not in _LOCALE_PRESETS:
+            logger.warning(
+                "news.locale.unknown_dropped",
+                extra={"event": "news_locale_unknown_dropped", "locale": token},
+            )
+            continue
+        seen.add(token)
+        out.append(token)
+    return out or ["en"]
+
+
 # ── Factory ─────────────────────────────────────────────────────────────
 
 
@@ -337,24 +444,44 @@ def build_news_provider(
     *,
     provider:           str,
     cache_ttl_seconds:  float,
+    locales:            str = "en",
 ) -> NewsProviderInstance:
-    """Build the configured news provider with cache, or return None
-    so the caller falls back to MockNewsProvider.
+    """Build the configured news provider stack, or return None so the
+    caller falls back to MockNewsProvider.
 
-    Returning None on `provider="none"` lets `main.py` keep the simple
-    "swap MockNewsProvider in" branch without needing to know what's
-    inside this module.
+    Layering when `provider="google_rss"`:
+        Settings.news_locales="en"     →  Caching(GoogleRSS(en))
+        Settings.news_locales="ko"     →  Caching(GoogleRSS(ko))
+        Settings.news_locales="en,ko"  →  Composite([
+                                            Caching(GoogleRSS(en)),
+                                            Caching(GoogleRSS(ko)),
+                                          ])
+
+    Each locale gets its OWN cache so a fresh-on-en miss doesn't trigger
+    a fresh-on-ko miss in the same call. Composite parallelizes the
+    per-locale fetches via asyncio.gather and dedups merged titles.
     """
     p = (provider or "none").strip().lower()
     if p == "none":
         return None
-    if p == "google_rss":
-        return CachingNewsProvider(
-            GoogleNewsRSSProvider(),
-            ttl_seconds=cache_ttl_seconds,
+    if p != "google_rss":
+        logger.error(
+            "news.factory.unknown_provider",
+            extra={"event": "news_factory_unknown_provider", "provider": p},
         )
-    logger.error(
-        "news.factory.unknown_provider",
-        extra={"event": "news_factory_unknown_provider", "provider": p},
-    )
-    return None
+        return None
+
+    locale_tokens = _parse_locale_list(locales)
+    cached_per_locale: list[NewsProvider] = []
+    for token in locale_tokens:
+        hl, gl, ceid = _LOCALE_PRESETS[token]
+        cached_per_locale.append(
+            CachingNewsProvider(
+                GoogleNewsRSSProvider(hl=hl, gl=gl, ceid=ceid),
+                ttl_seconds=cache_ttl_seconds,
+            )
+        )
+
+    if len(cached_per_locale) == 1:
+        return cached_per_locale[0]
+    return CompositeNewsProvider(cached_per_locale)
