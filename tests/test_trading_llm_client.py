@@ -162,7 +162,7 @@ async def test_anthropic_client_posts_to_correct_url_with_correct_headers_and_bo
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["x-api-key"]         == "sk-ant-xxx"
     assert captured["headers"]["anthropic-version"] == "2023-06-01"
-    assert captured["json"]["model"]                == "claude-haiku-4-5-20251001"
+    assert captured["json"]["model"]                == "claude-sonnet-4-7-20250828"
     # Anthropic enforces JSON via the SYSTEM prompt — verify it's present
     # so we don't drift from the structured-output contract.
     assert "JSON" in captured["json"]["system"]

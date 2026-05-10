@@ -19,24 +19,24 @@
 
 INSERT INTO entity (id, cluster, anomaly, tx_vol) VALUES
     -- Tech / semis / platforms
-    ('005930', 'TECH',          0.12,   8_412_000_000),  -- Samsung Electronics
-    ('000660', 'TECH',          0.18,   3_220_000_000),  -- SK Hynix
-    ('035420', 'TECH',          0.71,   1_180_000_000),  -- NAVER  (elevated)
-    ('035720', 'TECH',          0.22,     842_000_000),  -- Kakao
+    ('005930', 'TECH',          0.12,   8412000000),  -- Samsung Electronics
+    ('000660', 'TECH',          0.18,   3220000000),  -- SK Hynix
+    ('035420', 'TECH',          0.71,   1180000000),  -- NAVER  (elevated)
+    ('035720', 'TECH',          0.22,     842000000),  -- Kakao
 
     -- Financial holdings
-    ('105560', 'FINANCE',       0.08,   1_540_000_000),  -- KB Financial
-    ('055550', 'FINANCE',       0.11,   1_180_000_000),  -- Shinhan
-    ('086790', 'FINANCE',       0.09,     720_000_000),  -- Hana Financial
+    ('105560', 'FINANCE',       0.08,   1540000000),  -- KB Financial
+    ('055550', 'FINANCE',       0.11,   1180000000),  -- Shinhan
+    ('086790', 'FINANCE',       0.09,     720000000),  -- Hana Financial
 
     -- Heavy manufacturing / materials
-    ('005380', 'MANUFACTURING', 0.27,   1_910_000_000),  -- Hyundai Motor
-    ('005490', 'MANUFACTURING', 0.31,   1_240_000_000),  -- POSCO Holdings
-    ('051910', 'MANUFACTURING', 0.68,   2_080_000_000),  -- LG Chem  (elevated)
+    ('005380', 'MANUFACTURING', 0.27,   1910000000),  -- Hyundai Motor
+    ('005490', 'MANUFACTURING', 0.31,   1240000000),  -- POSCO Holdings
+    ('051910', 'MANUFACTURING', 0.68,   2080000000),  -- LG Chem  (elevated)
 
     -- Biopharma
-    ('207940', 'BIO',           0.14,     980_000_000),  -- Samsung Biologics
-    ('068270', 'BIO',           0.19,     620_000_000)   -- Celltrion
+    ('207940', 'BIO',           0.14,     980000000),  -- Samsung Biologics
+    ('068270', 'BIO',           0.19,     620000000)   -- Celltrion
 ON CONFLICT (id) DO NOTHING;
 
 

@@ -36,11 +36,19 @@ logger = logging.getLogger(__name__)
 
 
 # ── Defaults ────────────────────────────────────────────────────────────
-# Model picks favor cost+latency since this is per-tick / per-symbol on a
-# busy day. Override via `Settings.llm_model` when calibration data shows
-# a stronger model is worth the spend.
+# Default-model rationale (Sprint 5n bumped Anthropic default Haiku → Sonnet):
+#   The MacroAgent's job is reasoning over price action + multi-locale news to
+#   produce a structured trade-direction call. Reasoning quality matters more
+#   than per-call latency at this seat: Sonnet 4.7's better instruction-
+#   following gives more reliable JSON-schema adherence (fewer parse failures
+#   → fewer HOLD@0 fallbacks), and its richer chain-of-reasoning yields
+#   stronger confidence calibration. Cost is ~5x Haiku, but tick-driven
+#   evaluation is cache-buffered behind the 10-min news TTL + per-symbol
+#   coordinator throttle that lands in 5o, so total spend stays bounded.
+#   Operators tuning for cost can override via `LLM_MODEL=claude-haiku-...`.
+# OpenAI default stays gpt-4o-mini — it's the equivalent cost/quality knee.
 _DEFAULT_OPENAI_MODEL    = "gpt-4o-mini"
-_DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-7-20250828"
 # 8s caps the per-tick latency the trading pipeline can absorb. Most
 # completions land in 1-3s; a hung provider must surrender well before
 # the next tick arrives so the publisher loop isn't dominated by one
