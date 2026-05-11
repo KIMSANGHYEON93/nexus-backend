@@ -437,6 +437,61 @@ async def test_market_repo_snapshot_db_error_returns_empty():
     assert await repo.snapshot_per_symbol(["005930"]) == []
 
 
+# ── list_recent_tape (Sprint 5p-E) ────────────────────────────────────
+
+
+async def test_market_repo_tape_returns_cross_symbol_rows():
+    """Forensic tape — newest-first across all requested symbols. Same
+    Decimal→float cast as the other read paths."""
+    rows = [
+        {
+            "ts":     datetime(2026, 5, 11, 0, 30, 10, tzinfo=timezone.utc),
+            "symbol": "005930",
+            "price":  Decimal("79100"),
+            "volume": 250,
+            "side":   "buy",
+        },
+        {
+            "ts":     datetime(2026, 5, 11, 0, 30, 9, tzinfo=timezone.utc),
+            "symbol": "000660",
+            "price":  Decimal("197500"),
+            "volume": 110,
+            "side":   "sell",
+        },
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = MarketRepository(pool)
+    out = await repo.list_recent_tape(["005930", "000660"], limit=50)
+    assert len(out) == 2
+    assert out[0]["symbol"] == "005930"
+    assert isinstance(out[0]["price"], float)
+    sql, args = pool.fetch_calls[0]
+    assert "FROM market_tick" in sql
+    assert "ORDER BY ts DESC" in sql
+    assert "= ANY($1)" in sql
+    assert args == (["005930", "000660"], 50)
+
+
+async def test_market_repo_tape_empty_input_short_circuits():
+    pool = _MockPool(fetch_returns=[])
+    repo = MarketRepository(pool)
+    assert await repo.list_recent_tape([], limit=50) == []
+    assert pool.fetch_calls == []
+
+
+async def test_market_repo_tape_zero_limit_short_circuits():
+    pool = _MockPool(fetch_returns=[])
+    repo = MarketRepository(pool)
+    assert await repo.list_recent_tape(["005930"], limit=0) == []
+    assert pool.fetch_calls == []
+
+
+async def test_market_repo_tape_db_error_returns_empty():
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = MarketRepository(pool)
+    assert await repo.list_recent_tape(["005930"], limit=50) == []
+
+
 # ════════════════════════════════════════════════════════════════════════
 #                             PersistenceWorker
 # ════════════════════════════════════════════════════════════════════════

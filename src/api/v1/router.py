@@ -31,6 +31,8 @@ from .dto import (
     MarketTickRecentDTO,
     MarketTickSnapshotDTO,
     MarketTickSnapshotsDTO,
+    MarketTickTapeDTO,
+    MarketTickTapeEntryDTO,
     MigrationStatusDTO,
     ReadinessDTO,
     SnapshotDTO,
@@ -147,6 +149,40 @@ async def latest_snapshot(
             for r in edges_raw
         ],
         ts=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/ticks/tape", response_model=MarketTickTapeDTO)
+async def ticks_tape(
+    repo: Annotated[MarketRepository, Depends(_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    symbols: Annotated[str, Query(min_length=1, max_length=2048,
+                                   description="Comma-separated symbols")],
+    limit: Annotated[int, Query(ge=1, le=500,
+                                 description="Newest-first row cap")] = 100,
+) -> MarketTickTapeDTO:
+    """Cross-symbol tape — every recorded tick across the requested
+    symbols, newest-first. Drives the TapePanel HUD for forensic
+    "what hit between 09:34:50 and 09:35:10" review.
+
+    Distinct from `/v1/ticks/snapshot` (which collapses to one row
+    per symbol) and `/v1/ticks/recent` (single-symbol per-tick).
+    Limit clamped 1..500 at the FastAPI layer; symbol list capped
+    at 50 to keep the SQL bounded. Empty/whitespace-only input
+    short-circuits to an empty envelope rather than erroring.
+    """
+    parts = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not parts:
+        return MarketTickTapeDTO(entries=[])
+    if len(parts) > 50:
+        parts = parts[:50]
+    logger.debug(
+        "ticks-tape served n_syms=%d limit=%d to %s (tenant=%s)",
+        len(parts), limit, principal.subject, principal.tenant,
+    )
+    rows = await repo.list_recent_tape(symbols=parts, limit=limit)
+    return MarketTickTapeDTO(
+        entries=[MarketTickTapeEntryDTO.model_validate(r) for r in rows],
     )
 
 

@@ -155,3 +155,28 @@ class MarketTickSnapshotsDTO(BaseModel):
 
     requested: list[str]
     snapshots: list[MarketTickSnapshotDTO]
+
+
+class MarketTickTapeEntryDTO(BaseModel):
+    """One row of the cross-symbol tape (Sprint 5p-E). Same shape as
+    MarketTickSnapshotDTO — the type is intentionally separate so the
+    OpenAPI schema reflects the distinct surfaces (snapshot = per-symbol
+    latest, tape = cross-symbol stream). Frontend keeps them as one
+    TypeScript type because the field shape is identical today; if
+    they ever diverge (e.g. tape gets a trade-id), splitting will be a
+    one-line change."""
+
+    ts:     datetime
+    symbol: str
+    price:  float
+    volume: int
+    side:   str
+
+
+class MarketTickTapeDTO(BaseModel):
+    """Response envelope for `/v1/ticks/tape`. Newest-first across all
+    requested symbols — forensic surface for "what hit the wire between
+    09:34:50 and 09:35:10?". Wrapped in an envelope so a future since/
+    cursor parameter doesn't break the contract."""
+
+    entries: list[MarketTickTapeEntryDTO]

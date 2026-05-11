@@ -146,6 +146,49 @@ class MarketRepository:
             for r in rows
         ]
 
+    # ── Cross-symbol tape (Sprint 5p-E) ──────────────────────────────────
+    # Forensic surface — answers "what hit the wire between 09:34:50 and
+    # 09:35:10 across all subscribed symbols?". `list_recent_ticks` is
+    # per-symbol; this is its cross-symbol sibling, ORDER BY ts DESC over
+    # the whole `symbol = ANY($1)` slice. Same `(symbol, ts DESC)` index
+    # still services it — PG does an index scan per symbol then merges,
+    # which is fine for 12 symbols × LIMIT 200 (~2400 fetched rows max).
+    # Same fault-tolerance + Decimal→float edge cast as the rest.
+    async def list_recent_tape(
+        self,
+        symbols: list[str],
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not symbols or limit < 1:
+            return []
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT ts, symbol, price, volume, side
+                  FROM market_tick
+                 WHERE symbol = ANY($1)
+                 ORDER BY ts DESC
+                 LIMIT $2
+                """,
+                symbols, limit,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ):
+            return []
+        return [
+            {
+                "ts":     r["ts"],
+                "symbol": r["symbol"],
+                "price":  float(r["price"]),
+                "volume": int(r["volume"]),
+                "side":   r["side"],
+            }
+            for r in rows
+        ]
+
     # ── Recent raw ticks (Sprint 5p-C) ───────────────────────────────────
     # Sprint 5p-C: tick-level read path for the PropertyHUD price sparkline.
     # The continuous-aggregate path above is rounded to 1-minute buckets and

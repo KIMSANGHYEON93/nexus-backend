@@ -516,6 +516,70 @@ def test_ticks_snapshot_whitespace_only_returns_empty_envelope(app_with_mocks):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  /v1/ticks/tape — Sprint 5p-E
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_ticks_tape_empty_returns_envelope(app_with_mocks):
+    """No rows → 200 with empty entries (TapePanel renders empty hint)."""
+    app, _, _ = app_with_mocks
+    body = TestClient(app).get(
+        "/v1/ticks/tape?symbols=005930,000660"
+    ).json()
+    assert body == {"entries": []}
+
+
+def test_ticks_tape_returns_newest_first(env_minimal, monkeypatch):
+    rows = [
+        {
+            "ts":     _dt(2026, 5, 11, 0, 30, 10, tzinfo=_tz.utc),
+            "symbol": "005930",
+            "price":  _Decimal("79100"),
+            "volume": 250,
+            "side":   "buy",
+        },
+        {
+            "ts":     _dt(2026, 5, 11, 0, 30, 9, tzinfo=_tz.utc),
+            "symbol": "000660",
+            "price":  _Decimal("197500"),
+            "volume": 110,
+            "side":   "sell",
+        },
+    ]
+    pool = _build_mock_pool(tick_rows=rows)
+    redis_client = _build_mock_redis()
+    import src.infrastructure.database as db_mod
+    import src.infrastructure.redis_pubsub as redis_mod
+    monkeypatch.setattr(db_mod, "_pool", pool)
+    monkeypatch.setattr(redis_mod, "_client", redis_client)
+
+    body = TestClient(_build_app()).get(
+        "/v1/ticks/tape?symbols=005930,000660&limit=50"
+    ).json()
+    assert len(body["entries"]) == 2
+    assert body["entries"][0]["symbol"] == "005930"
+    assert body["entries"][0]["price"] == 79100.0
+    assert body["entries"][1]["side"] == "sell"
+
+
+def test_ticks_tape_missing_symbols_returns_problem_json(app_with_mocks):
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/ticks/tape")
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_ticks_tape_limit_out_of_range_rejected(app_with_mocks):
+    app, _, _ = app_with_mocks
+    assert TestClient(app).get(
+        "/v1/ticks/tape?symbols=005930&limit=0"
+    ).status_code == 422
+    assert TestClient(app).get(
+        "/v1/ticks/tape?symbols=005930&limit=501"
+    ).status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Error envelope shape (RFC 7807) + request_id propagation
 # ──────────────────────────────────────────────────────────────────────────
 
