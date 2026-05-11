@@ -322,6 +322,71 @@ async def test_execution_repo_fetch_recent_zero_limit_short_circuits():
 
 
 # ════════════════════════════════════════════════════════════════════════
+#       MarketRepository.list_recent_ticks (Sprint 5p-C)
+# ════════════════════════════════════════════════════════════════════════
+# Read path for the PropertyHUD price sparkline. Same fault-tolerance
+# contract as ExecutionRepository.fetch_recent — DB error collapses to
+# [] so the HUD shows an empty trace instead of 500-ing.
+
+
+from src.domain.market.repository import MarketRepository
+
+
+def _tick_row(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "ts":     datetime(2026, 5, 11, 0, 30, 0, tzinfo=timezone.utc),
+        "price":  Decimal("78900"),
+        "volume": 120,
+        "side":   "buy",
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_market_repo_list_recent_ticks_returns_rows_newest_first():
+    """Repo decodes asyncpg rows into dict shape + casts NUMERIC price
+    to float for downstream sparkline math."""
+    rows = [
+        _tick_row(),
+        _tick_row(
+            ts=datetime(2026, 5, 11, 0, 29, 58, tzinfo=timezone.utc),
+            price=Decimal("78850"),
+            side="sell",
+        ),
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = MarketRepository(pool)
+    out = await repo.list_recent_ticks("005930", limit=10)
+    assert len(out) == 2
+    # Symbol is the query input, not echoed in the row — repo returns
+    # only the per-tick fields. Float cast happens at the repo edge.
+    assert out[0]["price"] == 78900.0
+    assert isinstance(out[0]["price"], float)
+    assert out[0]["volume"] == 120
+    assert out[1]["side"] == "sell"
+    sql, args = pool.fetch_calls[0]
+    assert "FROM market_tick" in sql
+    assert "ORDER BY ts DESC" in sql
+    assert args == ("005930", 10)
+
+
+async def test_market_repo_list_recent_ticks_db_error_returns_empty_list():
+    """PG / interface / OS / timeout errors all collapse to [] so the
+    HUD never sees a 500 from a transient DB blip."""
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = MarketRepository(pool)
+    assert await repo.list_recent_ticks("005930") == []
+
+
+async def test_market_repo_list_recent_ticks_zero_limit_short_circuits():
+    """Defensive guard — limit<1 must NOT issue a query."""
+    pool = _MockPool(fetch_returns=[_tick_row()])
+    repo = MarketRepository(pool)
+    assert await repo.list_recent_ticks("005930", limit=0) == []
+    assert pool.fetch_calls == []
+
+
+# ════════════════════════════════════════════════════════════════════════
 #                             PersistenceWorker
 # ════════════════════════════════════════════════════════════════════════
 

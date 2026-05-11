@@ -101,3 +101,54 @@ class MarketRepository:
             symbol, limit,
         )
         return [dict(r) for r in rows]
+
+    # ── Recent raw ticks (Sprint 5p-C) ───────────────────────────────────
+    # Sprint 5p-C: tick-level read path for the PropertyHUD price sparkline.
+    # The continuous-aggregate path above is rounded to 1-minute buckets and
+    # only useful for longer windows; the live HUD wants per-tick resolution
+    # so the operator can see the wiggle inside the current minute. Backed
+    # by the `(symbol, ts DESC)` index from migration 001; LIMIT keeps the
+    # range scan bounded even when the table grows.
+    #
+    # Read path is fault-tolerant by the same rule as ExecutionRepository.
+    # fetch_recent: PG/interface/OS/timeout errors all collapse to [] so a
+    # transient outage shows an empty sparkline instead of 500-ing the HUD.
+    async def list_recent_ticks(
+        self,
+        symbol: str,
+        limit: int = 60,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT ts, price, volume, side
+                  FROM market_tick
+                 WHERE symbol = $1
+                 ORDER BY ts DESC
+                 LIMIT $2
+                """,
+                symbol, limit,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ):
+            # Repo silently degrades — the router converts to a clean empty
+            # response. Operators see "no ticks" in the HUD instead of a
+            # confusing error chip; ops sees the underlying cause in DB logs.
+            return []
+        # `price` is NUMERIC in the schema — asyncpg returns Decimal. The
+        # router serializes via pydantic Decimal handling, but the HUD wants
+        # a float for sparkline math, so we cast at the edge.
+        return [
+            {
+                "ts":     r["ts"],
+                "price":  float(r["price"]),
+                "volume": int(r["volume"]),
+                "side":   r["side"],
+            }
+            for r in rows
+        ]

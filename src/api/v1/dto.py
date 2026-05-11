@@ -108,3 +108,26 @@ class AuditRecentDTO(BaseModel):
 
     symbol: str
     rows:   list[AuditRowDTO]
+
+
+class MarketTickDTO(BaseModel):
+    """One raw tick row from `market_tick`. Powers the PropertyHUD price
+    sparkline so the operator sees per-tick wiggle inside the current
+    minute (not just the 1m OHLC aggregate). `price` arrives as a Python
+    float at the repo edge — NUMERIC in PG, Decimal in asyncpg, cast to
+    float in `MarketRepository.list_recent_ticks` because sparkline
+    rendering wants ordinary numbers."""
+
+    ts:     datetime
+    price:  float
+    volume: int
+    side:   str  # 'buy' | 'sell'
+
+
+class MarketTickRecentDTO(BaseModel):
+    """Response envelope for `/v1/ticks/recent`. Wrapped for the same
+    forward-compat reason as `AuditRecentDTO` — adding total/cursor
+    fields later won't break the contract."""
+
+    symbol: str
+    ticks:  list[MarketTickDTO]

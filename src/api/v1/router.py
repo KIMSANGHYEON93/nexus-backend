@@ -27,6 +27,8 @@ from .dto import (
     AuditRowDTO,
     EdgeDTO,
     EntityDTO,
+    MarketTickDTO,
+    MarketTickRecentDTO,
     MigrationStatusDTO,
     ReadinessDTO,
     SnapshotDTO,
@@ -143,6 +145,35 @@ async def latest_snapshot(
             for r in edges_raw
         ],
         ts=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/ticks/recent", response_model=MarketTickRecentDTO)
+async def ticks_recent(
+    repo: Annotated[MarketRepository, Depends(_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    symbol: Annotated[str, Query(min_length=1, max_length=64,
+                                  description="Entity / KIS ticker — e.g. '005930'")],
+    limit: Annotated[int, Query(ge=1, le=500,
+                                 description="Newest-first tick cap")] = 60,
+) -> MarketTickRecentDTO:
+    """Recent raw ticks for one symbol, newest-first. Powers the
+    PropertyHUD price sparkline (Sprint 5p-C) so the operator sees the
+    actual price wiggle inside the current minute instead of a
+    1m-rounded OHLC bar. Authenticated under the same dev-bypass rule
+    as `/v1/snapshot` and `/v1/audit/recent`.
+
+    Empty list on DB issue (repo-side fault tolerance) — the HUD
+    renders an empty sparkline + status hint rather than 500-ing.
+    """
+    logger.debug(
+        "ticks served symbol=%s limit=%d to %s (tenant=%s)",
+        symbol, limit, principal.subject, principal.tenant,
+    )
+    rows = await repo.list_recent_ticks(symbol=symbol, limit=limit)
+    return MarketTickRecentDTO(
+        symbol=symbol,
+        ticks=[MarketTickDTO.model_validate(r) for r in rows],
     )
 
 

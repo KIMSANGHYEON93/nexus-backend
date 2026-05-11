@@ -45,6 +45,7 @@ def _build_mock_pool(
     entities: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
     audit_rows: list[dict[str, Any]] | None = None,
+    tick_rows: list[dict[str, Any]] | None = None,
     db_ping_raises: Exception | None = None,
 ) -> MagicMock:
     """Pool whose acquire().__aenter__() returns a connection. The connection
@@ -69,6 +70,8 @@ def _build_mock_pool(
             return edges or []
         if "FROM execution_audit" in sql:
             return audit_rows or []
+        if "FROM market_tick" in sql:
+            return tick_rows or []
         return []
     conn.fetch = AsyncMock(side_effect=_fetch)
 
@@ -373,6 +376,78 @@ def test_audit_recent_limit_out_of_range_rejected(app_with_mocks):
     ).status_code == 422
     assert TestClient(app).get(
         "/v1/audit/recent?symbol=005930&limit=201"
+    ).status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  /v1/ticks/recent — Sprint 5p-C
+# ──────────────────────────────────────────────────────────────────────────
+from decimal import Decimal as _Decimal
+
+
+def _tick_pg_row(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "ts":     _dt(2026, 5, 11, 0, 30, 0, tzinfo=_tz.utc),
+        "price":  _Decimal("78900"),
+        "volume": 120,
+        "side":   "buy",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ticks_recent_empty_returns_envelope(app_with_mocks):
+    """No ticks in DB → 200 with empty list (HUD shows empty sparkline)."""
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/ticks/recent?symbol=005930")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"symbol": "005930", "ticks": []}
+
+
+def test_ticks_recent_returns_rows(env_minimal, monkeypatch):
+    """Two seeded ticks come back through the envelope with prices cast
+    to float (NUMERIC → Decimal → float at the repo edge)."""
+    rows = [
+        _tick_pg_row(),
+        _tick_pg_row(
+            ts=_dt(2026, 5, 11, 0, 29, 58, tzinfo=_tz.utc),
+            price=_Decimal("78850"),
+            side="sell",
+        ),
+    ]
+    pool = _build_mock_pool(tick_rows=rows)
+    redis_client = _build_mock_redis()
+    import src.infrastructure.database as db_mod
+    import src.infrastructure.redis_pubsub as redis_mod
+    monkeypatch.setattr(db_mod, "_pool", pool)
+    monkeypatch.setattr(redis_mod, "_client", redis_client)
+
+    body = TestClient(_build_app()).get(
+        "/v1/ticks/recent?symbol=005930&limit=60"
+    ).json()
+    assert body["symbol"] == "005930"
+    assert len(body["ticks"]) == 2
+    assert body["ticks"][0]["price"] == 78900.0
+    assert isinstance(body["ticks"][0]["price"], float)
+    assert body["ticks"][1]["side"] == "sell"
+
+
+def test_ticks_recent_missing_symbol_returns_problem_json(app_with_mocks):
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/ticks/recent")
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_ticks_recent_limit_out_of_range_rejected(app_with_mocks):
+    """Limit clamped to 1..500 at the FastAPI layer."""
+    app, _, _ = app_with_mocks
+    assert TestClient(app).get(
+        "/v1/ticks/recent?symbol=005930&limit=0"
+    ).status_code == 422
+    assert TestClient(app).get(
+        "/v1/ticks/recent?symbol=005930&limit=501"
     ).status_code == 422
 
 
