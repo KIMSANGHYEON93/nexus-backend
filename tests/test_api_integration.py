@@ -580,6 +580,64 @@ def test_ticks_tape_limit_out_of_range_rejected(app_with_mocks):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  /v1/ticks/volume — Sprint 5p-H
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_ticks_volume_empty_returns_envelope(app_with_mocks):
+    """No tick rows → repo returns zero entries per requested symbol so
+    the HUD renders empty bars instead of dropping rows."""
+    app, _, _ = app_with_mocks
+    body = TestClient(app).get(
+        "/v1/ticks/volume?symbols=005930,000660&window_minutes=30"
+    ).json()
+    assert body["window_minutes"] == 30
+    # Zero-filled buckets for the two requested symbols
+    assert [b["symbol"] for b in body["buckets"]] == ["005930", "000660"]
+    assert all(b["total_volume"] == 0 for b in body["buckets"])
+
+
+def test_ticks_volume_returns_aggregates(env_minimal, monkeypatch):
+    rows = [
+        {"symbol": "005930", "total_volume": 12_500, "tick_count": 87},
+        {"symbol": "000660", "total_volume":  4_300, "tick_count": 32},
+    ]
+    pool = _build_mock_pool(tick_rows=rows)
+    redis_client = _build_mock_redis()
+    import src.infrastructure.database as db_mod
+    import src.infrastructure.redis_pubsub as redis_mod
+    monkeypatch.setattr(db_mod, "_pool", pool)
+    monkeypatch.setattr(redis_mod, "_client", redis_client)
+
+    body = TestClient(_build_app()).get(
+        "/v1/ticks/volume?symbols=005930,000660,035420&window_minutes=60"
+    ).json()
+    assert body["window_minutes"] == 60
+    assert len(body["buckets"]) == 3
+    by_sym = {b["symbol"]: b for b in body["buckets"]}
+    assert by_sym["005930"]["total_volume"] == 12_500
+    assert by_sym["000660"]["total_volume"] == 4_300
+    assert by_sym["035420"]["total_volume"] == 0
+
+
+def test_ticks_volume_window_out_of_range_rejected(app_with_mocks):
+    app, _, _ = app_with_mocks
+    assert TestClient(app).get(
+        "/v1/ticks/volume?symbols=005930&window_minutes=0"
+    ).status_code == 422
+    assert TestClient(app).get(
+        "/v1/ticks/volume?symbols=005930&window_minutes=1441"
+    ).status_code == 422
+
+
+def test_ticks_volume_missing_symbols_returns_problem_json(app_with_mocks):
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/ticks/volume")
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Error envelope shape (RFC 7807) + request_id propagation
 # ──────────────────────────────────────────────────────────────────────────
 

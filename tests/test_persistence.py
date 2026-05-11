@@ -492,6 +492,48 @@ async def test_market_repo_tape_db_error_returns_empty():
     assert await repo.list_recent_tape(["005930"], limit=50) == []
 
 
+# ── aggregate_volume (Sprint 5p-H) ────────────────────────────────────
+
+
+async def test_market_repo_aggregate_volume_returns_one_entry_per_symbol():
+    """SUM(volume) per symbol; symbols with no rows in the window get
+    a zero entry so the HUD doesn't drop them from the bar chart."""
+    rows = [
+        {"symbol": "005930", "total_volume": 12_500, "tick_count": 87},
+        {"symbol": "000660", "total_volume":  4_300, "tick_count": 32},
+        # '035420' absent → repo synthesizes a zero entry
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = MarketRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    out = await repo.aggregate_volume(["005930", "000660", "035420"], since=since)
+    assert len(out) == 3
+    assert out[0]["symbol"] == "005930"
+    assert out[0]["total_volume"] == 12_500
+    assert out[1]["total_volume"] == 4_300
+    # Missing symbol filled in with zeros, order preserved
+    assert out[2] == {"symbol": "035420", "total_volume": 0, "tick_count": 0}
+    sql, args = pool.fetch_calls[0]
+    assert "SUM(volume)" in sql
+    assert "GROUP BY symbol" in sql
+    assert args[0] == ["005930", "000660", "035420"]
+
+
+async def test_market_repo_aggregate_volume_empty_input_short_circuits():
+    pool = _MockPool(fetch_returns=[])
+    repo = MarketRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    assert await repo.aggregate_volume([], since=since) == []
+    assert pool.fetch_calls == []
+
+
+async def test_market_repo_aggregate_volume_db_error_returns_empty():
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = MarketRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    assert await repo.aggregate_volume(["005930"], since=since) == []
+
+
 # ════════════════════════════════════════════════════════════════════════
 #                             PersistenceWorker
 # ════════════════════════════════════════════════════════════════════════

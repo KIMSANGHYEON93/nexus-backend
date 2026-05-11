@@ -8,7 +8,7 @@ possible; mutating operations land in dedicated sub-routers.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -33,6 +33,8 @@ from .dto import (
     MarketTickSnapshotsDTO,
     MarketTickTapeDTO,
     MarketTickTapeEntryDTO,
+    MarketVolumeBucketDTO,
+    MarketVolumeWindowDTO,
     MigrationStatusDTO,
     ReadinessDTO,
     SnapshotDTO,
@@ -149,6 +151,44 @@ async def latest_snapshot(
             for r in edges_raw
         ],
         ts=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/ticks/volume", response_model=MarketVolumeWindowDTO)
+async def ticks_volume(
+    repo: Annotated[MarketRepository, Depends(_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    symbols: Annotated[str, Query(min_length=1, max_length=2048,
+                                   description="Comma-separated symbols")],
+    window_minutes: Annotated[int, Query(ge=1, le=1440,
+                                          description="Lookback window")] = 60,
+) -> MarketVolumeWindowDTO:
+    """Per-symbol volume aggregate over the trailing `window_minutes`.
+    Powers the VolumeHistogram HUD panel — operator can compare which
+    KIS subscriptions are getting the most action at a glance.
+
+    Symbols are aligned to the operator's request order so the HUD
+    renders rows deterministically; symbols with zero ticks in the
+    window come back as `total_volume = 0` entries rather than being
+    silently dropped, so the bar chart shows their (empty) presence.
+
+    50-symbol hard cap + 1..1440 (24h) window clamp; empty / whitespace-
+    only `symbols` short-circuits to an empty buckets list.
+    """
+    parts = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not parts:
+        return MarketVolumeWindowDTO(window_minutes=window_minutes, buckets=[])
+    if len(parts) > 50:
+        parts = parts[:50]
+    since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    logger.debug(
+        "ticks-volume served n=%d window=%dm to %s (tenant=%s)",
+        len(parts), window_minutes, principal.subject, principal.tenant,
+    )
+    rows = await repo.aggregate_volume(symbols=parts, since=since)
+    return MarketVolumeWindowDTO(
+        window_minutes=window_minutes,
+        buckets=[MarketVolumeBucketDTO.model_validate(r) for r in rows],
     )
 
 

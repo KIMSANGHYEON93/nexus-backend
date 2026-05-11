@@ -146,6 +146,62 @@ class MarketRepository:
             for r in rows
         ]
 
+    # ── Volume aggregate per symbol (Sprint 5p-H) ────────────────────────
+    # Powers the VolumeHistogram HUD panel — relative bar chart of
+    # `SUM(volume)` over a recent window per symbol. Single GROUP BY
+    # against the (symbol, ts DESC) index; `ts >= $2` puts a hard upper
+    # bound on rows scanned even when the table grows.
+    #
+    # Returns one entry per REQUESTED symbol — symbols with no ticks in
+    # the window get `total_volume = 0` so the HUD renders an empty bar
+    # rather than dropping the row. This requires a small Python merge
+    # because GROUP BY emits only symbols that have rows; lining it up
+    # with the operator's requested order is the router's job today,
+    # but happens here so the read surface stays self-contained.
+    async def aggregate_volume(
+        self,
+        symbols: list[str],
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        if not symbols:
+            return []
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT symbol,
+                       SUM(volume)::BIGINT  AS total_volume,
+                       COUNT(*)::BIGINT     AS tick_count
+                  FROM market_tick
+                 WHERE symbol = ANY($1)
+                   AND ts    >= $2
+                 GROUP BY symbol
+                """,
+                symbols, since,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ):
+            return []
+        # Index returned rows by symbol so we can stitch in zeros for
+        # symbols that had no ticks. Bigger universes might justify a
+        # set-based approach, but at 12 symbols a dict comprehension is
+        # cleaner than fighting asyncpg's iterator twice.
+        by_symbol = {r["symbol"]: r for r in rows}
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            r = by_symbol.get(sym)
+            if r is None:
+                out.append({"symbol": sym, "total_volume": 0, "tick_count": 0})
+            else:
+                out.append({
+                    "symbol":       r["symbol"],
+                    "total_volume": int(r["total_volume"]),
+                    "tick_count":   int(r["tick_count"]),
+                })
+        return out
+
     # ── Cross-symbol tape (Sprint 5p-E) ──────────────────────────────────
     # Forensic surface — answers "what hit the wire between 09:34:50 and
     # 09:35:10 across all subscribed symbols?". `list_recent_ticks` is

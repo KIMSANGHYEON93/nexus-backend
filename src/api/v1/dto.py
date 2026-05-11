@@ -180,3 +180,23 @@ class MarketTickTapeDTO(BaseModel):
     cursor parameter doesn't break the contract."""
 
     entries: list[MarketTickTapeEntryDTO]
+
+
+class MarketVolumeBucketDTO(BaseModel):
+    """Volume aggregate for one symbol over the requested window.
+    `total_volume = 0, tick_count = 0` for symbols with no recorded
+    ticks — caller gets one entry per requested symbol so the HUD
+    renders an empty bar rather than dropping the row entirely."""
+
+    symbol:       str
+    total_volume: int
+    tick_count:   int
+
+
+class MarketVolumeWindowDTO(BaseModel):
+    """Response envelope for `/v1/ticks/volume` — relative volume
+    histogram source. `window_minutes` echoed back so the HUD can
+    label the panel ("VOLUME · 60M") without re-parsing the request."""
+
+    window_minutes: int
+    buckets:        list[MarketVolumeBucketDTO]
