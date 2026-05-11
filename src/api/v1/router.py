@@ -25,6 +25,10 @@ from ...infrastructure.redis_pubsub import get_client
 from .dto import (
     AuditRecentDTO,
     AuditRowDTO,
+    BlockedReasonDTO,
+    BlockedReasonsDTO,
+    DecisionBucketDTO,
+    DecisionRateDTO,
     EdgeDTO,
     EntityDTO,
     MarketTickDTO,
@@ -290,6 +294,62 @@ async def ticks_recent(
     return MarketTickRecentDTO(
         symbol=symbol,
         ticks=[MarketTickDTO.model_validate(r) for r in rows],
+    )
+
+
+@router.get("/metrics/decisions", response_model=DecisionRateDTO)
+async def metrics_decisions(
+    audit: Annotated[ExecutionRepository, Depends(_audit_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    window_minutes: Annotated[int, Query(ge=1, le=1440,
+                                          description="Lookback window")] = 30,
+) -> DecisionRateDTO:
+    """Per-minute coordinator decision counts over the trailing window.
+    Powers the SystemHealthPanel decisions/min sparkline. Splits the
+    total into live-fill / shadow / noop / blocked so the operator can
+    catch "all noop right now" vs "fills firing" at a glance.
+
+    Window clamped 1..1440 (24h) at FastAPI layer. Empty array on DB
+    error so the HUD renders a flat trace instead of 500-ing.
+    """
+    since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    logger.debug(
+        "metrics-decisions served window=%dm to %s (tenant=%s)",
+        window_minutes, principal.subject, principal.tenant,
+    )
+    rows = await audit.aggregate_decisions_per_minute(since=since)
+    return DecisionRateDTO(
+        window_minutes=window_minutes,
+        buckets=[DecisionBucketDTO.model_validate(r) for r in rows],
+    )
+
+
+@router.get("/metrics/blocked", response_model=BlockedReasonsDTO)
+async def metrics_blocked(
+    audit: Annotated[ExecutionRepository, Depends(_audit_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    window_minutes: Annotated[int, Query(ge=1, le=1440,
+                                          description="Lookback window")] = 60,
+) -> BlockedReasonsDTO:
+    """Distribution of guardrail blocks over the trailing window.
+    Powers the SystemHealthPanel blocked-reason breakdown chart —
+    operator sees which guard (cooldown / max_position / volatility_
+    breaker) is filtering the most signals.
+
+    `total_blocked` is pre-summed so the HUD doesn't have to reduce
+    the array client-side just to label the panel.
+    """
+    since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    rows = await audit.aggregate_blocked_reasons(since=since)
+    total = sum(int(r["n_blocked"]) for r in rows)
+    logger.debug(
+        "metrics-blocked served window=%dm total=%d to %s (tenant=%s)",
+        window_minutes, total, principal.subject, principal.tenant,
+    )
+    return BlockedReasonsDTO(
+        window_minutes=window_minutes,
+        total_blocked=total,
+        reasons=[BlockedReasonDTO.model_validate(r) for r in rows],
     )
 
 

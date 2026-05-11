@@ -200,3 +200,50 @@ class MarketVolumeWindowDTO(BaseModel):
 
     window_minutes: int
     buckets:        list[MarketVolumeBucketDTO]
+
+
+class DecisionBucketDTO(BaseModel):
+    """One minute-bucket of coordinator decision activity. Powers the
+    SystemHealthPanel decisions/min sparkline + ALIVE indicator.
+
+    Split counters let the HUD show the mix (live fills vs shadow vs
+    noop) on top of total throughput — operator catches "all decisions
+    are noop right now" without scanning audit rows by hand."""
+
+    bucket:    datetime
+    n_total:   int
+    n_live:    int
+    n_shadow:  int
+    n_noop:    int
+    n_blocked: int
+
+
+class DecisionRateDTO(BaseModel):
+    """Response envelope for `/v1/metrics/decisions`. `window_minutes`
+    echoed back so the HUD can label the chart ("DECISIONS · 30M")
+    without re-parsing the request. Buckets are newest-first; the HUD
+    reverses for left-to-right time axis."""
+
+    window_minutes: int
+    buckets:        list[DecisionBucketDTO]
+
+
+class BlockedReasonDTO(BaseModel):
+    """One guardrail's blocked-decision count within the window, plus
+    the most recent timestamp it fired. Sorted desc by `n_blocked` at
+    the SQL layer so the operator sees the dominant rate-limiter at
+    the top of the breakdown chart."""
+
+    guard_id:      str
+    n_blocked:     int
+    last_fired_at: datetime
+
+
+class BlockedReasonsDTO(BaseModel):
+    """Response envelope for `/v1/metrics/blocked`. `total_blocked` is
+    pre-summed across reasons so the HUD doesn't have to add the
+    array client-side just to label the panel."""
+
+    window_minutes: int
+    total_blocked:  int
+    reasons:        list[BlockedReasonDTO]

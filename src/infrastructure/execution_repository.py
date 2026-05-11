@@ -156,6 +156,110 @@ class ExecutionRepository:
             return []
         return [self._row_to_dict(r) for r in rows]
 
+    # ── Observability aggregates (Sprint 5q) ────────────────────────────
+    # Decision-rate timeseries + blocked-reason breakdown for the
+    # SystemHealthPanel. Both reads land on the (ts) hypertable index
+    # via `ts >= since` predicate, then GROUP BY in PG so we ship one
+    # bucket per row instead of streaming the whole window.
+
+    async def aggregate_decisions_per_minute(
+        self,
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        """Per-minute decision counts split by execution mode + a
+        derived `n_blocked` for guardrail-throttled rows. Newest bucket
+        first so the HUD sparkline can build oldest→newest by reversing
+        once on the client (matches the existing audit modal contract).
+        Falls back to [] on DB error.
+        """
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT date_trunc('minute', ts)                                  AS bucket,
+                       COUNT(*)                                            ::BIGINT AS n_total,
+                       COUNT(*) FILTER (WHERE mode = 'live' AND executed) ::BIGINT AS n_live,
+                       COUNT(*) FILTER (WHERE mode = 'shadow')             ::BIGINT AS n_shadow,
+                       COUNT(*) FILTER (WHERE mode = 'noop')               ::BIGINT AS n_noop,
+                       COUNT(*) FILTER (WHERE blocked_by IS NOT NULL)      ::BIGINT AS n_blocked
+                  FROM execution_audit
+                 WHERE ts >= $1
+                 GROUP BY bucket
+                 ORDER BY bucket DESC
+                """,
+                since,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ) as exc:
+            logger.warning(
+                "execution_repo.decisions_per_minute_failed",
+                extra={
+                    "event":      "execution_repo_decisions_failed",
+                    "error_type": type(exc).__name__,
+                    "error":      str(exc)[:200],
+                },
+            )
+            return []
+        return [
+            {
+                "bucket":    r["bucket"],
+                "n_total":   int(r["n_total"]),
+                "n_live":    int(r["n_live"]),
+                "n_shadow":  int(r["n_shadow"]),
+                "n_noop":    int(r["n_noop"]),
+                "n_blocked": int(r["n_blocked"]),
+            }
+            for r in rows
+        ]
+
+    async def aggregate_blocked_reasons(
+        self,
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        """Distribution of `blocked_by` values within the window.
+        Powers the guardrail-firing breakdown chart — operator can see
+        at a glance which guard is filtering the most signals
+        (cooldown / max_position / volatility_breaker / etc).
+        """
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT blocked_by                          AS guard_id,
+                       COUNT(*)                ::BIGINT    AS n_blocked,
+                       MAX(ts)                             AS last_fired_at
+                  FROM execution_audit
+                 WHERE ts         >= $1
+                   AND blocked_by IS NOT NULL
+                 GROUP BY blocked_by
+                 ORDER BY n_blocked DESC
+                """,
+                since,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ) as exc:
+            logger.warning(
+                "execution_repo.blocked_reasons_failed",
+                extra={
+                    "event":      "execution_repo_blocked_reasons_failed",
+                    "error_type": type(exc).__name__,
+                    "error":      str(exc)[:200],
+                },
+            )
+            return []
+        return [
+            {
+                "guard_id":       r["guard_id"],
+                "n_blocked":      int(r["n_blocked"]),
+                "last_fired_at":  r["last_fired_at"],
+            }
+            for r in rows
+        ]
+
     @staticmethod
     def _row_to_dict(row: Any) -> dict[str, Any]:
         """Normalize one asyncpg Record into the API DTO shape.

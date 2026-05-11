@@ -321,6 +321,84 @@ async def test_execution_repo_fetch_recent_zero_limit_short_circuits():
     assert pool.fetch_calls == []
 
 
+# ── aggregate_decisions_per_minute + aggregate_blocked_reasons (5q) ────
+
+
+async def test_execution_repo_decisions_per_minute_returns_split_counts():
+    """SystemHealthPanel decision-rate aggregate — total + mode split."""
+    rows = [
+        {
+            "bucket":    datetime(2026, 5, 11, 0, 30, 0, tzinfo=timezone.utc),
+            "n_total":   120,
+            "n_live":    0,
+            "n_shadow":  0,
+            "n_noop":    120,
+            "n_blocked": 0,
+        },
+        {
+            "bucket":    datetime(2026, 5, 11, 0, 29, 0, tzinfo=timezone.utc),
+            "n_total":   118,
+            "n_live":    0,
+            "n_shadow":  0,
+            "n_noop":    115,
+            "n_blocked": 3,
+        },
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = ExecutionRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    out = await repo.aggregate_decisions_per_minute(since=since)
+    assert len(out) == 2
+    assert out[0]["n_total"] == 120
+    assert out[1]["n_blocked"] == 3
+    sql, args = pool.fetch_calls[0]
+    assert "date_trunc('minute', ts)" in sql
+    assert "GROUP BY bucket" in sql
+    assert "ORDER BY bucket DESC" in sql
+    assert args == (since,)
+
+
+async def test_execution_repo_decisions_per_minute_db_error_returns_empty():
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = ExecutionRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    assert await repo.aggregate_decisions_per_minute(since=since) == []
+
+
+async def test_execution_repo_blocked_reasons_returns_sorted_breakdown():
+    """SystemHealthPanel guardrail-breakdown aggregate — sorted desc."""
+    rows = [
+        {
+            "guard_id":      "cooldown",
+            "n_blocked":     12,
+            "last_fired_at": datetime(2026, 5, 11, 0, 30, 0, tzinfo=timezone.utc),
+        },
+        {
+            "guard_id":      "max_position",
+            "n_blocked":     3,
+            "last_fired_at": datetime(2026, 5, 11, 0, 28, 0, tzinfo=timezone.utc),
+        },
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = ExecutionRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    out = await repo.aggregate_blocked_reasons(since=since)
+    assert len(out) == 2
+    assert out[0]["guard_id"] == "cooldown"
+    assert out[0]["n_blocked"] == 12
+    sql, args = pool.fetch_calls[0]
+    assert "blocked_by IS NOT NULL" in sql
+    assert "GROUP BY blocked_by" in sql
+    assert "ORDER BY n_blocked DESC" in sql
+
+
+async def test_execution_repo_blocked_reasons_db_error_returns_empty():
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = ExecutionRepository(pool)
+    since = datetime(2026, 5, 11, 0, 0, 0, tzinfo=timezone.utc)
+    assert await repo.aggregate_blocked_reasons(since=since) == []
+
+
 # ════════════════════════════════════════════════════════════════════════
 #       MarketRepository.list_recent_ticks (Sprint 5p-C)
 # ════════════════════════════════════════════════════════════════════════
