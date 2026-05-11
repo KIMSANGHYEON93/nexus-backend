@@ -131,3 +131,27 @@ class MarketTickRecentDTO(BaseModel):
 
     symbol: str
     ticks:  list[MarketTickDTO]
+
+
+class MarketTickSnapshotDTO(BaseModel):
+    """Single-symbol entry inside a snapshot response — the LATEST tick
+    seen on the wire for that symbol. Used by the KisLiveSnapshot HUD
+    grid to show all subscribed tickers at a glance."""
+
+    symbol: str
+    ts:     datetime
+    price:  float
+    volume: int
+    side:   str  # 'buy' | 'sell'
+
+
+class MarketTickSnapshotsDTO(BaseModel):
+    """Response envelope for `/v1/ticks/snapshot`. The `requested`
+    array preserves the operator's symbol order so the HUD can render
+    rows in a deterministic sequence even when DISTINCT ON drops
+    symbols without recorded ticks. `snapshots` covers only the
+    symbols that have at least one tick on file — missing entries
+    surface as empty rows in the HUD."""
+
+    requested: list[str]
+    snapshots: list[MarketTickSnapshotDTO]

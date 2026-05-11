@@ -102,6 +102,50 @@ class MarketRepository:
         )
         return [dict(r) for r in rows]
 
+    # ── Multi-symbol last-tick snapshot (Sprint 5p-D) ────────────────────
+    # Surface for the KisLiveSnapshot HUD panel — operator needs to see
+    # all 12 KIS subscriptions at once without clicking through each one.
+    # `DISTINCT ON (symbol)` collapses to the newest tick per symbol in
+    # a single index scan, much cheaper than 12 separate fetch_recent
+    # calls. Falls back silently on DB error (same rule as fetch_recent
+    # paths) so the HUD renders empty placeholders rather than 500-ing.
+    #
+    # Symbols filter is `= ANY($1)` — asyncpg maps Python list → Postgres
+    # array, so we don't have to dynamically build a paramaterized IN list.
+    async def snapshot_per_symbol(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, Any]]:
+        if not symbols:
+            return []
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT DISTINCT ON (symbol)
+                       symbol, ts, price, volume, side
+                  FROM market_tick
+                 WHERE symbol = ANY($1)
+                 ORDER BY symbol, ts DESC
+                """,
+                symbols,
+            )
+        except (
+            asyncpg.PostgresError,
+            asyncpg.InterfaceError,
+            OSError, TimeoutError,
+        ):
+            return []
+        return [
+            {
+                "symbol": r["symbol"],
+                "ts":     r["ts"],
+                "price":  float(r["price"]),
+                "volume": int(r["volume"]),
+                "side":   r["side"],
+            }
+            for r in rows
+        ]
+
     # ── Recent raw ticks (Sprint 5p-C) ───────────────────────────────────
     # Sprint 5p-C: tick-level read path for the PropertyHUD price sparkline.
     # The continuous-aggregate path above is rounded to 1-minute buckets and

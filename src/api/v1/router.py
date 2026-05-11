@@ -29,6 +29,8 @@ from .dto import (
     EntityDTO,
     MarketTickDTO,
     MarketTickRecentDTO,
+    MarketTickSnapshotDTO,
+    MarketTickSnapshotsDTO,
     MigrationStatusDTO,
     ReadinessDTO,
     SnapshotDTO,
@@ -145,6 +147,44 @@ async def latest_snapshot(
             for r in edges_raw
         ],
         ts=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/ticks/snapshot", response_model=MarketTickSnapshotsDTO)
+async def ticks_snapshot(
+    repo: Annotated[MarketRepository, Depends(_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    symbols: Annotated[str, Query(min_length=1, max_length=2048,
+                                   description="Comma-separated symbols, e.g. '005930,000660'")],
+) -> MarketTickSnapshotsDTO:
+    """Last-tick snapshot for many symbols in one round-trip. Drives
+    the right-column KisLiveSnapshot grid so the operator sees all 12
+    KIS subscriptions at a glance without 12 separate fetches.
+
+    Empty symbols (after splitting + trimming) → 422 by Query length
+    check above. Symbols with no recorded ticks are silently dropped
+    from `snapshots`; the `requested` field preserves the operator's
+    input order so the HUD can render placeholder rows for the gaps.
+
+    Hard cap of 50 symbols to keep the SQL bounded — the KIS universe
+    is 12 today and unlikely to balloon past that, but a defensive cap
+    prevents a malformed query from sweeping the whole hypertable.
+    """
+    parts = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not parts:
+        # Empty after trim → equivalent to "no symbols", return empty.
+        return MarketTickSnapshotsDTO(requested=[], snapshots=[])
+    if len(parts) > 50:
+        parts = parts[:50]
+
+    logger.debug(
+        "ticks-snapshot served n=%d to %s (tenant=%s)",
+        len(parts), principal.subject, principal.tenant,
+    )
+    rows = await repo.snapshot_per_symbol(symbols=parts)
+    return MarketTickSnapshotsDTO(
+        requested=parts,
+        snapshots=[MarketTickSnapshotDTO.model_validate(r) for r in rows],
     )
 
 

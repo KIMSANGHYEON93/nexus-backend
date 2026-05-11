@@ -452,6 +452,70 @@ def test_ticks_recent_limit_out_of_range_rejected(app_with_mocks):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  /v1/ticks/snapshot — Sprint 5p-D
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_ticks_snapshot_empty_when_no_rows(app_with_mocks):
+    """Symbols requested but DB has nothing → `snapshots` is [] and the
+    `requested` array is preserved verbatim for HUD row ordering."""
+    app, _, _ = app_with_mocks
+    body = TestClient(app).get(
+        "/v1/ticks/snapshot?symbols=005930,000660"
+    ).json()
+    assert body == {"requested": ["005930", "000660"], "snapshots": []}
+
+
+def test_ticks_snapshot_returns_one_row_per_symbol(env_minimal, monkeypatch):
+    rows = [
+        {
+            "symbol": "005930",
+            "ts":     _dt(2026, 5, 11, 0, 30, 0, tzinfo=_tz.utc),
+            "price":  _Decimal("79100"),
+            "volume": 250,
+            "side":   "buy",
+        },
+        {
+            "symbol": "000660",
+            "ts":     _dt(2026, 5, 11, 0, 29, 58, tzinfo=_tz.utc),
+            "price":  _Decimal("197500"),
+            "volume": 110,
+            "side":   "sell",
+        },
+    ]
+    pool = _build_mock_pool(tick_rows=rows)
+    redis_client = _build_mock_redis()
+    import src.infrastructure.database as db_mod
+    import src.infrastructure.redis_pubsub as redis_mod
+    monkeypatch.setattr(db_mod, "_pool", pool)
+    monkeypatch.setattr(redis_mod, "_client", redis_client)
+
+    body = TestClient(_build_app()).get(
+        "/v1/ticks/snapshot?symbols=005930,000660,035420"
+    ).json()
+    assert body["requested"] == ["005930", "000660", "035420"]
+    assert len(body["snapshots"]) == 2
+    assert body["snapshots"][0]["price"] == 79100.0
+    assert isinstance(body["snapshots"][0]["price"], float)
+
+
+def test_ticks_snapshot_missing_symbols_returns_problem_json(app_with_mocks):
+    app, _, _ = app_with_mocks
+    response = TestClient(app).get("/v1/ticks/snapshot")
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_ticks_snapshot_whitespace_only_returns_empty_envelope(app_with_mocks):
+    """A comma-only or whitespace-only `symbols` is non-empty per the
+    Query min_length check, but parses to zero usable symbols. Endpoint
+    should respond cleanly rather than 500ing the SQL."""
+    app, _, _ = app_with_mocks
+    body = TestClient(app).get("/v1/ticks/snapshot?symbols=,,, ").json()
+    assert body == {"requested": [], "snapshots": []}
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Error envelope shape (RFC 7807) + request_id propagation
 # ──────────────────────────────────────────────────────────────────────────
 

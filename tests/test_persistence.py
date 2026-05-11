@@ -386,6 +386,57 @@ async def test_market_repo_list_recent_ticks_zero_limit_short_circuits():
     assert pool.fetch_calls == []
 
 
+# ── snapshot_per_symbol (Sprint 5p-D) ─────────────────────────────────
+
+
+async def test_market_repo_snapshot_returns_one_row_per_symbol():
+    """Multi-symbol latest-tick read; price cast to float at the edge."""
+    rows = [
+        {
+            "symbol": "005930",
+            "ts":     datetime(2026, 5, 11, 0, 30, 0, tzinfo=timezone.utc),
+            "price":  Decimal("79100"),
+            "volume": 250,
+            "side":   "buy",
+        },
+        {
+            "symbol": "000660",
+            "ts":     datetime(2026, 5, 11, 0, 29, 58, tzinfo=timezone.utc),
+            "price":  Decimal("197500"),
+            "volume": 110,
+            "side":   "sell",
+        },
+    ]
+    pool = _MockPool(fetch_returns=rows)
+    repo = MarketRepository(pool)
+    out = await repo.snapshot_per_symbol(["005930", "000660", "035420"])
+    assert len(out) == 2
+    assert out[0]["symbol"] == "005930"
+    assert out[0]["price"] == 79100.0
+    assert isinstance(out[0]["price"], float)
+    sql, args = pool.fetch_calls[0]
+    assert "DISTINCT ON (symbol)" in sql
+    assert "= ANY($1)" in sql
+    # asyncpg gets the symbols list verbatim
+    assert args == (["005930", "000660", "035420"],)
+
+
+async def test_market_repo_snapshot_empty_input_short_circuits():
+    """No SQL issued when input list is empty."""
+    pool = _MockPool(fetch_returns=[])
+    repo = MarketRepository(pool)
+    assert await repo.snapshot_per_symbol([]) == []
+    assert pool.fetch_calls == []
+
+
+async def test_market_repo_snapshot_db_error_returns_empty():
+    """Same fault-tolerance rule as list_recent_ticks — DB error collapses
+    to [] so the HUD shows blank rows rather than 500-ing."""
+    pool = _MockPool(raise_on=asyncpg.InterfaceError)
+    repo = MarketRepository(pool)
+    assert await repo.snapshot_per_symbol(["005930"]) == []
+
+
 # ════════════════════════════════════════════════════════════════════════
 #                             PersistenceWorker
 # ════════════════════════════════════════════════════════════════════════
