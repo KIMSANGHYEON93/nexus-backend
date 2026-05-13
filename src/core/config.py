@@ -44,6 +44,76 @@ class Settings(BaseSettings):
         "086790,005380,005490,051910,207940,068270"
     )
 
+    # ── US equities publisher (Sprint 5s) ──────────────────────────────
+    # Server-side counterpart to the frontend's MomentumStreamer('live').
+    # When enabled, UsPublisher polls Yahoo Finance's public chart
+    # endpoint and publishes US ticks to `nexus.market.tick` alongside
+    # KRX — the persistence worker, audit pipeline, and trading pipeline
+    # are all symbol-agnostic, so flipping this on automatically backfills
+    # DB persist + audit coverage + signal-sparkline rows for US tickers.
+    #
+    # Off by default to keep the bring-up path narrow until operator opts in.
+    #
+    # Why Yahoo, not the Alpha Vantage proxy the frontend uses: the AV
+    # proxy's shared free-tier key is capped at 25 requests per DAY,
+    # easily exhausted by frontend traffic alone. Yahoo's chart endpoint
+    # has no per-day cap that matters at our scale. Symbol-agnostic
+    # wire-format means the swap is invisible to every downstream
+    # consumer; frontend stays on AV for its own reasons.
+    us_publisher_enabled: bool = False
+    us_subscribe_symbols: str = (
+        # Mirrors the frontend MomentumStreamer MOMENTUM_UNIVERSE (28 tickers).
+        # Keep them in sync — adding a symbol here without registering it as
+        # a frontend entity means useMarketData silently drops the tick.
+        "AAPL,MSFT,NVDA,AVGO,CRM,AMD,INTC,ORCL,"
+        "GOOGL,META,NFLX,DIS,"
+        "AMZN,TSLA,HD,MCD,NKE,"
+        "LLY,JNJ,UNH,MRK,PFE,"
+        "JPM,V,MA,BAC,"
+        "XOM,CVX"
+    )
+    # 30s × 4-symbol batches → 28-symbol rotation every ~3.5 min. Yahoo
+    # tolerates much higher rates but we don't need it — backend persist
+    # doesn't need sub-second freshness.
+    us_poll_interval_seconds: float = 30.0
+    us_batch_size: int = 4
+    us_data_source_url: str = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+    # ── Extra-universe Yahoo publisher (Sprint 5s 전면 개선) ────────────
+    # Polymorphic publisher covering everything the canvas renders OUTSIDE
+    # the 12 KRX + 28 US equity universes — sector ETFs, FX pairs,
+    # commodities, crypto, market indices (VIX/DXY), US Treasury yields.
+    # The full symbol→Yahoo-ticker mapping lives in
+    # `src/infrastructure/us_publisher.py::EXTRA_YAHOO_SYMBOLS` (30 entries
+    # at 2026-05-11). Yahoo ticker conventions diverge across instrument
+    # classes (`CL=F` for WTI futures, `^VIX` for the index, `EURUSD=X`
+    # for FX) so the publisher takes a per-symbol map instead of a
+    # uniform suffix.
+    #
+    # Off by default for the same bring-up gate as the other publishers.
+    extra_yahoo_publisher_enabled: bool = False
+    # Slower than equity publishers — these instruments move more slowly
+    # (commodities, yields) and the canvas doesn't need sub-minute freshness.
+    extra_yahoo_poll_interval_seconds: float = 60.0
+    extra_yahoo_batch_size: int = 4
+
+    # ── KRX Yahoo publisher (Sprint 5s+) ───────────────────────────────
+    # Same Yahoo Finance chart endpoint, KRX ticker suffix ".KS"
+    # (000660 → 000660.KS). Runs as a SUPPLEMENT to KisPublisher: when
+    # KIS is alive and streaming during 09:00–15:30 KST, KIS's sub-
+    # second WS ticks dominate the wire; when KIS dies at market close
+    # (intraday-only WS contract) or fails OAuth refresh, Yahoo keeps
+    # publishing real KRX closing prices instead of letting MockPublisher
+    # take over with a 2024-era synthetic universe (the "SK Hynix 199K"
+    # discrepancy the operator caught — real 2026-05 price is ~1.88M).
+    #
+    # Slow poll (60s) is intentional — KRX off-hours data only changes
+    # at the next session open, and during hours KIS handles freshness.
+    krx_yahoo_publisher_enabled: bool = False
+    krx_yahoo_poll_interval_seconds: float = 60.0
+    krx_yahoo_batch_size: int = 4
+    krx_yahoo_symbol_suffix: str = ".KS"
+
     # ── Trading execution (Sprint 5g) ──────────────────────────────────
     # GLOBAL HARD SAFETY SWITCH. Default False — the OrderExecutor will
     # only emit shadow-trade logs and NEVER call the KIS order REST API.
@@ -116,6 +186,10 @@ class Settings(BaseSettings):
     @property
     def kis_subscribe_symbol_list(self) -> list[str]:
         return [s.strip() for s in self.kis_subscribe_symbols.split(",") if s.strip()]
+
+    @property
+    def us_subscribe_symbol_list(self) -> list[str]:
+        return [s.strip() for s in self.us_subscribe_symbols.split(",") if s.strip()]
 
     @property
     def resolved_entra_issuer(self) -> str:

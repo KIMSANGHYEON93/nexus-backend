@@ -50,6 +50,7 @@ from .infrastructure.persistence_worker import PersistenceWorker
 from .infrastructure.publisher_supervisor import PublisherSupervisor
 from .infrastructure.redis_pubsub import close_client, get_client, init_client
 from .infrastructure.tick_repository import TickRepository
+from .infrastructure.us_publisher import EXTRA_YAHOO_SYMBOLS, UsPublisher
 
 
 # Configure logging at import time so module-load messages also flow
@@ -225,18 +226,114 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         },
     )
 
+    # ── US equities publisher (Sprint 5s) ──────────────────────────────
+    # Sibling to PublisherSupervisor — runs independently so a US-side
+    # outage (Yahoo blip) can't take down the KRX path. Same on_tick
+    # observer so audit/persistence pipelines treat US ticks identically
+    # to KRX. Gated off by default; flip US_PUBLISHER_ENABLED=true.
+    us_publisher: UsPublisher | None = None
+    if settings.us_publisher_enabled:
+        us_publisher = UsPublisher(
+            get_client(),
+            settings.us_subscribe_symbol_list,
+            data_source_url = settings.us_data_source_url,
+            poll_interval_s = settings.us_poll_interval_seconds,
+            batch_size      = settings.us_batch_size,
+            on_tick         = trading_pipeline.on_tick,
+        )
+        await us_publisher.start()
+        logger.info(
+            "us publisher armed",
+            extra={
+                "event":   "us_publisher_armed",
+                "symbols": len(settings.us_subscribe_symbol_list),
+            },
+        )
+
+    # ── KRX Yahoo publisher (Sprint 5s+) ───────────────────────────────
+    # Real KRX prices via Yahoo as a SUPPLEMENT to KisPublisher. The two
+    # publish to the same `nexus.market.tick` channel:
+    #   • During KRX hours (09–15:30 KST) — KIS streams ~2 ticks/sec via
+    #     WS; Yahoo adds 1 tick per symbol per 60s. UI/DB latest-write
+    #     reflects whichever fired most recently, which during hours is
+    #     overwhelmingly KIS.
+    #   • Off-hours / weekends / KIS WS outages — only Yahoo publishes,
+    #     so SK Hynix shows its real ~1.88M close instead of Mock's
+    #     stale 197K.
+    # Same symbol list as KIS so the universes line up. `yahoo_symbol_
+    # suffix=".KS"` is appended for the Yahoo lookup; the published
+    # symbol stays bare (000660), matching the existing entity table
+    # and KIS publisher's wire format.
+    # ── Extra-universe Yahoo publisher (Sprint 5s 전면 개선) ────────────
+    # Real prices for everything OUTSIDE the KRX/US equity pair: sector
+    # ETFs (XLK/XLF/...), FX (EURUSD/USDJPY/...), commodities (WTI/Gold/
+    # Silver/...), crypto (BTC/ETH/USDT/USDC), market indices (VIX/DXY),
+    # US Treasury yields (UST10). Replaces the synthetic MockStreamer
+    # random walk that used to back these canvas nodes.
+    #
+    # Each symbol has its own Yahoo ticker via EXTRA_YAHOO_SYMBOLS map
+    # because Yahoo's ticker conventions vary by instrument class
+    # (`CL=F` futures vs `^VIX` index vs `EURUSD=X` FX).
+    extra_yahoo_publisher: UsPublisher | None = None
+    if settings.extra_yahoo_publisher_enabled:
+        extra_yahoo_publisher = UsPublisher(
+            get_client(),
+            list(EXTRA_YAHOO_SYMBOLS.keys()),
+            data_source_url  = settings.us_data_source_url,
+            poll_interval_s  = settings.extra_yahoo_poll_interval_seconds,
+            batch_size       = settings.extra_yahoo_batch_size,
+            yahoo_symbol_map = EXTRA_YAHOO_SYMBOLS,
+            on_tick          = trading_pipeline.on_tick,
+        )
+        await extra_yahoo_publisher.start()
+        logger.info(
+            "extra yahoo publisher armed",
+            extra={
+                "event":   "extra_yahoo_publisher_armed",
+                "symbols": len(EXTRA_YAHOO_SYMBOLS),
+            },
+        )
+
+    krx_yahoo_publisher: UsPublisher | None = None
+    if settings.krx_yahoo_publisher_enabled:
+        krx_yahoo_publisher = UsPublisher(
+            get_client(),
+            settings.kis_subscribe_symbol_list,
+            data_source_url     = settings.us_data_source_url,
+            poll_interval_s     = settings.krx_yahoo_poll_interval_seconds,
+            batch_size          = settings.krx_yahoo_batch_size,
+            yahoo_symbol_suffix = settings.krx_yahoo_symbol_suffix,
+            on_tick             = trading_pipeline.on_tick,
+        )
+        await krx_yahoo_publisher.start()
+        logger.info(
+            "krx yahoo publisher armed",
+            extra={
+                "event":   "krx_yahoo_publisher_armed",
+                "symbols": len(settings.kis_subscribe_symbol_list),
+                "suffix":  settings.krx_yahoo_symbol_suffix,
+            },
+        )
+
     try:
         yield
     finally:
         logger.info("backend shutting down")
         # Order matters:
-        #   1. Supervisor first → stops the publisher → no new ticks flow
-        #      into the pipeline → no new audit envelopes get published.
+        #   1. Supervisor + UsPublisher first → stops both publishers → no
+        #      new ticks flow into the pipeline → no new audit envelopes
+        #      get published.
         #   2. PersistenceWorker → drains pending tick buffer + cancels
         #      its Redis subscriptions before we close the Redis client.
         #   3. Redis client.
         #   4. DB pool LAST — repos still need it for the worker's final
         #      drain insert.
+        if us_publisher is not None:
+            await us_publisher.stop()
+        if extra_yahoo_publisher is not None:
+            await extra_yahoo_publisher.stop()
+        if krx_yahoo_publisher is not None:
+            await krx_yahoo_publisher.stop()
         await supervisor.stop()
         await persistence_worker.stop()
         await close_client()
