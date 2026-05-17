@@ -129,12 +129,33 @@ def app_with_mocks(env_minimal, monkeypatch):
 #  /v1/health
 # ──────────────────────────────────────────────────────────────────────────
 
-def test_health_returns_ok_payload(app_with_mocks):
+def test_health_returns_ok_with_publisher_field(app_with_mocks):
+    """publisher 필드가 응답에 포함되어야 한다."""
     app, _, _ = app_with_mocks
+    mock_supervisor = MagicMock()
+    mock_supervisor.active_kind = "mock"
+    app.state.supervisor = mock_supervisor
+
     client = TestClient(app)
     response = client.get("/v1/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "nexus-backend"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "nexus-backend"
+    assert body["publisher"] == "mock"
+
+
+def test_health_publisher_reflects_active_kind(app_with_mocks):
+    """active_kind가 'kis'이면 publisher='kis'를 반환해야 한다."""
+    app, _, _ = app_with_mocks
+    mock_supervisor = MagicMock()
+    mock_supervisor.active_kind = "kis"
+    app.state.supervisor = mock_supervisor
+
+    client = TestClient(app)
+    response = client.get("/v1/health")
+    assert response.status_code == 200
+    assert response.json()["publisher"] == "kis"
 
 
 def test_health_does_not_touch_db_or_redis(app_with_mocks):

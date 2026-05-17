@@ -8,6 +8,7 @@ responding the old shape.
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -247,3 +248,79 @@ class BlockedReasonsDTO(BaseModel):
     window_minutes: int
     total_blocked:  int
     reasons:        list[BlockedReasonDTO]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Operator Alarms — Sprint 5r (GET /v1/alarms)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Wire enums mirror the domain enums in `src/domain/alarms/models.py` 1:1.
+# We don't `from ...domain.alarms import Severity` here on purpose — the
+# DTO layer is the boundary, and we want the OpenAPI schema to enumerate
+# the literal strings without making the consumer guess at the domain
+# package's import path. The string values are identical, so the mapping
+# is a `.value` lookup in the router.
+
+
+class AlarmSeverity(str, Enum):
+    """Operator-visible severity enum on the JSON wire — string values
+    must match `src.domain.alarms.models.Severity` exactly."""
+
+    INFO     = "info"
+    WARN     = "warn"
+    ANOMALY  = "anomaly"
+    CRITICAL = "critical"
+
+
+class AlarmStatus(str, Enum):
+    """Alarm lifecycle on the JSON wire — string values must match
+    `src.domain.alarms.models.Status` exactly."""
+
+    ACTIVE       = "active"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED     = "resolved"
+
+
+class AlarmDTO(BaseModel):
+    """One row in the alarm panel — snake_case fields direct from the
+    domain model. The HUD reads every field by name; the only thing the
+    router does is cast enums to their `.value` and pass timestamps
+    through Pydantic's default ISO-8601 serializer."""
+
+    id:               str
+    severity:         AlarmSeverity
+    status:           AlarmStatus
+    source:           str
+    code:             str
+    title:            str
+    message:          str
+    occurred_at:      datetime
+    entity_id:        Optional[str]                = None
+    acknowledged_at:  Optional[datetime]           = None
+    resolved_at:      Optional[datetime]           = None
+    metadata:         Optional[dict[str, Any]]     = None
+
+
+class AlarmListDTO(BaseModel):
+    """Response envelope for `GET /v1/alarms`.
+
+    `unacknowledged_count` is the GLOBAL count of `status==active`
+    alarms, independent of the page filters — the panel header shows
+    "{n} UNACK" regardless of which severities the operator has filtered
+    to view. `window_since` echoes the effective lookback start (whether
+    explicitly requested or filled with `server_time - 24h` by the
+    router) so the HUD can label the time scale. `server_time` is the
+    response serialization moment, used by the frontend for clock-skew
+    correction on "age" labels."""
+
+    items:                list[AlarmDTO]
+    total:                int
+    unacknowledged_count: int
+    window_since:         Optional[datetime]
+    server_time:          datetime
+
+
+class HealthDTO(BaseModel):
+    status:    str   # 항상 "ok" — liveness probe는 5xx를 반환하지 않음
+    service:   str   # "nexus-backend"
+    publisher: str   # "kis" | "mock" | "none"

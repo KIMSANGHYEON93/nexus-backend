@@ -217,6 +217,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         get_client(), settings, on_tick=trading_pipeline.on_tick,
     )
     await supervisor.start()
+    app.state.supervisor = supervisor
     logger.info(
         "publisher supervisor armed",
         extra={

@@ -11,10 +11,22 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, status as http_status
+from fastapi.responses import JSONResponse
 
+from ...core.errors import PROBLEM_MEDIA_TYPE, ProblemDetail
+from ...core.logging import request_id_var
 from ...core.security import Principal, get_current_user, require_principal
+from ...domain.alarms.models import Alarm, Severity, Status
+from ...domain.alarms.repository import (
+    LIMIT_DEFAULT,
+    LIMIT_MAX,
+    LIMIT_MIN,
+    AlarmListFilters,
+    AlarmRepository,
+)
 from ...domain.market.repository import MarketRepository
+from ...infrastructure.alarms import build_seeded_repository
 from ...infrastructure.database import (
     EXPECTED_SCHEMA_VERSION,
     get_pool,
@@ -23,6 +35,10 @@ from ...infrastructure.database import (
 from ...infrastructure.execution_repository import ExecutionRepository
 from ...infrastructure.redis_pubsub import get_client
 from .dto import (
+    AlarmDTO,
+    AlarmListDTO,
+    AlarmSeverity,
+    AlarmStatus,
     AuditRecentDTO,
     AuditRowDTO,
     BlockedReasonDTO,
@@ -31,6 +47,7 @@ from .dto import (
     DecisionRateDTO,
     EdgeDTO,
     EntityDTO,
+    HealthDTO,
     MarketTickDTO,
     MarketTickRecentDTO,
     MarketTickSnapshotDTO,
@@ -60,10 +77,52 @@ def _audit_repo() -> ExecutionRepository:
     return ExecutionRepository(get_pool())
 
 
-@router.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness probe — does NOT touch DB or Redis (use /readyz for that)."""
-    return {"status": "ok", "service": "nexus-backend"}
+# ── Alarm repository — process-wide in-memory backend (Sprint 5r) ───────
+#
+# Persistence is deferred per spec §3: the read surface ships now with an
+# in-memory store seeded at process start, and the router only holds a
+# reference to the `AlarmRepository` Protocol. Swapping to a Timescale-
+# backed adapter later means changing only this factory.
+#
+# Singleton-on-first-use so the seed is built exactly once. Tests reach
+# in via `monkeypatch.setattr` to install their own empty repo before
+# making any HTTP call.
+_alarm_repo_singleton: AlarmRepository | None = None
+
+
+def _alarm_repo() -> AlarmRepository:
+    """Per-request DI factory — returns the process-wide alarm store.
+
+    First call constructs and seeds; subsequent calls re-use. Same shape
+    as `_repo()` / `_audit_repo()` so the router's import surface is
+    uniform across endpoints.
+    """
+    global _alarm_repo_singleton
+    if _alarm_repo_singleton is None:
+        _alarm_repo_singleton = build_seeded_repository()
+    return _alarm_repo_singleton
+
+
+def reset_alarm_repo_for_tests(repo: AlarmRepository | None = None) -> None:
+    """Replace (or clear) the process-wide alarm repo. Used by tests that
+    want to drive the router against an empty / hand-built repo. Calling
+    with `None` makes the next `_alarm_repo()` rebuild from the seed.
+    """
+    global _alarm_repo_singleton
+    _alarm_repo_singleton = repo
+
+
+@router.get("/health", response_model=HealthDTO)
+async def health(request: Request) -> HealthDTO:
+    """Liveness probe — does NOT touch DB or Redis (use /readyz for that).
+    publisher 필드로 현재 활성 tick 소스를 노출: kis | mock | none."""
+    from ...infrastructure.publisher_supervisor import PublisherSupervisor
+    supervisor: PublisherSupervisor | None = getattr(request.app.state, "supervisor", None)
+    return HealthDTO(
+        status="ok",
+        service="nexus-backend",
+        publisher=supervisor.active_kind if supervisor is not None else "none",
+    )
 
 
 @router.get("/readyz", response_model=ReadinessDTO)
@@ -383,4 +442,264 @@ async def audit_recent(
     return AuditRecentDTO(
         symbol=symbol,
         rows=[AuditRowDTO.model_validate(r) for r in rows],
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Operator alarms (Sprint 5r) — GET /v1/alarms
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Read-side surface for the right-column AlarmPanel HUD. Polled at 4s by
+# the frontend hook; spec §2 defines the CSV-encoded query params and
+# the AlarmListDTO envelope. Fault-tolerance policy mirrors
+# `/v1/audit/recent` — a repo-side failure yields an empty `items` list
+# and the operator's HUD renders an empty state instead of 500-ing.
+
+_DEFAULT_WINDOW = timedelta(hours=24)
+_INVALID_INPUT_TYPE = "https://nexus-os.local/problems/invalid-input"
+_INVALID_INPUT_TITLE = "Invalid query parameter"
+
+
+class _InvalidInput(Exception):
+    """Raised by the alarms query-param parsers when an enum/format is
+    malformed. Carries the spec's `invalid-input` problem-type URI plus a
+    human detail string that echoes the offending value. The route handler
+    catches this and renders it as `application/problem+json` so the
+    response body matches RFC 7807 with the correct `type` URI (instead
+    of Starlette's default `about:blank`).
+    """
+
+    __slots__ = ("detail",)
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _invalid_input_response(exc: _InvalidInput, instance: str) -> JSONResponse:
+    """Render `_InvalidInput` → 400 `application/problem+json` with the
+    spec's `invalid-input` type URI. Matches the shape produced by
+    `core.exception_handlers.http_exception_handler` so the frontend sees
+    a uniform ProblemDetail across every error path.
+    """
+    problem = ProblemDetail(
+        type=_INVALID_INPUT_TYPE,
+        title=_INVALID_INPUT_TITLE,
+        status=http_status.HTTP_400_BAD_REQUEST,
+        detail=exc.detail,
+        instance=instance,
+        request_id=request_id_var.get(),
+    )
+    return JSONResponse(
+        status_code=http_status.HTTP_400_BAD_REQUEST,
+        content=problem.model_dump(exclude_none=True),
+        media_type=PROBLEM_MEDIA_TYPE,
+    )
+
+
+def _parse_csv(raw: str | None, max_items: int = 50) -> list[str] | None:
+    """Split a comma-separated query value into trimmed non-empty tokens.
+
+    Returns None when the param is absent or trims to zero tokens — the
+    repository layer reads None as "no filter on this dimension". Hard
+    cap on token count keeps the in-memory linear scan bounded even if
+    a buggy client sends a 10k-token list.
+    """
+    if raw is None:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return None
+    if len(parts) > max_items:
+        parts = parts[:max_items]
+    return parts
+
+
+def _parse_severities(raw: str | None) -> frozenset[Severity] | None:
+    """CSV → `frozenset[Severity]`. Unknown tokens raise `_InvalidInput`
+    which the route handler renders as a 400 ProblemDetail with the spec's
+    `invalid-input` type URI (per spec — "severity 'foo' is not one of
+    info|warn|anomaly|critical")."""
+    tokens = _parse_csv(raw)
+    if tokens is None:
+        return None
+    out: set[Severity] = set()
+    for tok in tokens:
+        try:
+            out.add(Severity(tok))
+        except ValueError as e:
+            raise _InvalidInput(
+                f"severity {tok!r} is not one of "
+                f"{'|'.join(s.value for s in Severity)}"
+            ) from e
+    return frozenset(out) if out else None
+
+
+def _parse_statuses(raw: str | None) -> frozenset[Status]:
+    """CSV → `frozenset[Status]`. Default (raw=None) is `{ACTIVE}`,
+    matching the spec's "status filter default is active". Unknown tokens
+    raise `_InvalidInput` → 400 ProblemDetail with `invalid-input` URI."""
+    tokens = _parse_csv(raw)
+    if tokens is None:
+        return frozenset({Status.ACTIVE})
+    out: set[Status] = set()
+    for tok in tokens:
+        try:
+            out.add(Status(tok))
+        except ValueError as e:
+            raise _InvalidInput(
+                f"status {tok!r} is not one of "
+                f"{'|'.join(s.value for s in Status)}"
+            ) from e
+    return frozenset(out) if out else frozenset({Status.ACTIVE})
+
+
+def _parse_since(raw: str | None) -> datetime | None:
+    """RFC 3339 / ISO-8601 → tz-aware datetime. `Z` suffix supported.
+    A malformed timestamp raises `_InvalidInput` → 400 ProblemDetail with
+    `invalid-input` URI (matches spec §2 error table)."""
+    if raw is None:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    # `fromisoformat` since 3.11 accepts trailing 'Z' on the same call,
+    # but we normalize for cross-runtime safety.
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError as e:
+        raise _InvalidInput(
+            f"since {raw!r} is not a valid RFC 3339 / ISO-8601 timestamp"
+        ) from e
+    if parsed.tzinfo is None:
+        # Treat naive timestamps as UTC — the spec mandates UTC, and we
+        # don't want a missing offset to silently shift the window.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _alarm_to_dto(alarm: Alarm) -> AlarmDTO:
+    """Domain `Alarm` → wire `AlarmDTO`. Enums via `.value`, datetimes
+    pass through to Pydantic's default ISO-8601 serializer. Snake-case
+    is identity on the field names (spec §3 mapping table)."""
+    return AlarmDTO(
+        id=alarm.id,
+        severity=AlarmSeverity(alarm.severity.value),
+        status=AlarmStatus(alarm.status.value),
+        source=alarm.source,
+        code=alarm.code,
+        title=alarm.title,
+        message=alarm.message,
+        occurred_at=alarm.occurred_at,
+        entity_id=alarm.entity_id,
+        acknowledged_at=alarm.acknowledged_at,
+        resolved_at=alarm.resolved_at,
+        metadata=alarm.metadata,
+    )
+
+
+@router.get("/alarms", response_model=AlarmListDTO)
+async def alarms_list(
+    request: Request,
+    repo: Annotated[AlarmRepository, Depends(_alarm_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    limit: Annotated[int, Query(
+        ge=LIMIT_MIN, le=LIMIT_MAX,
+        description="Newest-first row cap (1..200)",
+    )] = LIMIT_DEFAULT,
+    since: Annotated[str | None, Query(
+        description="ISO-8601 UTC lookback start; default is server_time - 24h",
+    )] = None,
+    severity: Annotated[str | None, Query(
+        description="CSV of info|warn|anomaly|critical",
+    )] = None,
+    status: Annotated[str | None, Query(
+        description="CSV of active|acknowledged|resolved (default: active)",
+    )] = None,
+    source: Annotated[str | None, Query(
+        description="CSV of source identifiers (kebab-case)",
+    )] = None,
+) -> AlarmListDTO | JSONResponse:
+    """Operator alarm list — newest-first, filterable, fault-tolerant.
+
+    Powers the right-column AlarmPanel HUD. Frontend polls every 4s; we
+    keep the read path forgiving (empty list on repo trouble) so the
+    panel never goes red just because the store hiccuped. Authentication
+    matches `/v1/snapshot` (Entra bearer in prod; anonymous dev-bypass
+    when Entra isn't configured and APP_ENV=development).
+
+    Filters are CSV-encoded query params parsed in-router (FastAPI's
+    Pydantic-driven validation can't enumerate per-token enum values for
+    a comma-separated string). Unknown enum tokens produce a 400 with the
+    spec's `invalid-input` problem-type URI and the offending value
+    echoed in `detail`. `since` defaults to `now - 24h` so the HUD has a
+    bounded window even when the operator hasn't passed a timestamp.
+
+    `unacknowledged_count` is the GLOBAL active-count — spec mandates it
+    is independent of the page filters so the panel header always shows
+    the true unack total even while the operator is filtering the list.
+    """
+    # ── Parse + validate query inputs ─────────────────────────────────
+    # `_InvalidInput` carries the spec's invalid-input type URI. Catch
+    # here (rather than letting FastAPI render via HTTPException, which
+    # produces `type=about:blank`) so the 400 body matches RFC 7807 with
+    # the correct `type` field per spec §2 error table.
+    try:
+        severities = _parse_severities(severity)
+        statuses   = _parse_statuses(status)
+        sources    = _parse_csv(source, max_items=20)
+        since_dt   = _parse_since(since)
+    except _InvalidInput as exc:
+        return _invalid_input_response(exc, instance=str(request.url.path))
+
+    server_time = datetime.now(timezone.utc)
+    window_since = since_dt if since_dt is not None else server_time - _DEFAULT_WINDOW
+
+    filters = AlarmListFilters(
+        statuses=statuses,
+        severities=severities,
+        sources=tuple(sources) if sources is not None else None,
+        since=window_since,
+        limit=limit,
+    )
+
+    logger.debug(
+        "alarms served limit=%d sev=%s status=%s src=%s to %s (tenant=%s)",
+        limit,
+        sorted(s.value for s in severities) if severities else "*",
+        sorted(s.value for s in statuses),
+        sources if sources else "*",
+        principal.subject, principal.tenant,
+    )
+
+    # ── Fetch from repo — fault-tolerant on backend trouble ────────────
+    # Two reads (`list` + `count_active`) so the global UNACK badge is
+    # independent of the page filter. Per spec: a transient repo failure
+    # yields a 200 with empty items and unacknowledged_count=0 rather
+    # than a 503 — the HUD renders an empty state and recovers on the
+    # next poll. Domain-invariant violations are different — those are
+    # programmer errors and we want them surfaced as 500.
+    try:
+        items, total = await repo.list(filters)
+        unacked = await repo.count_active()
+    except ValueError:
+        # Domain invariant violated upstream of the router — re-raise so
+        # the 500 catch-all renders an internal-error ProblemDetail.
+        # ValueError signals "the data we stored was malformed", which is
+        # a different class of problem from a transient backend hiccup.
+        raise
+    except Exception:  # noqa: BLE001
+        # Anything else (network, OS, DB driver) collapses to an empty
+        # envelope — the spec's fault-tolerant fallback.
+        logger.exception("alarms repo read failed; returning empty envelope")
+        items, total, unacked = [], 0, 0
+
+    return AlarmListDTO(
+        items=[_alarm_to_dto(a) for a in items],
+        total=total,
+        unacknowledged_count=unacked,
+        window_since=window_since,
+        server_time=server_time,
     )
