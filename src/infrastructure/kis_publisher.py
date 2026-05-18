@@ -311,6 +311,7 @@ class KisPublisher:
                 elif isinstance(item, Quote):
                     payload = json.dumps(_quote_to_wire(item))
                     await self._client.publish(CHANNEL_QUOTE, payload)
+                    self._published += 1
         except asyncio.CancelledError:
             raise
         except Exception:
