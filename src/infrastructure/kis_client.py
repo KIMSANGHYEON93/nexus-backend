@@ -41,7 +41,7 @@ from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from ..core.config import Settings
-from ..domain.market.models import Tick, TickSide
+from ..domain.market.models import Quote, QuoteLevel, Tick, TickSide
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,19 @@ _FLD_TIME_HMS  = 1    # STCK_CNTG_HOUR  — HHMMSS in KST
 _FLD_PRICE     = 2    # STCK_PRPR       — current execution price
 _FLD_TICK_VOL  = 12   # CNTG_VOL        — volume of this tick (NOT cumulative)
 _FLD_CCLD_DVSN = 21   # CCLD_DVSN       — "1"=buyer-initiated, "5"=seller-initiated
+
+# H0STASP0 caret-delimited field indices (5-level order book).
+# ⚠ VERIFY: 실제 H0STASP0 응답 프레임에서 확인할 것.
+# 일부 KIS 버전은 ASKP1-10 (idx 2-11) 다음 BIDP1-10 (idx 12-21) 순이다.
+# 그 경우 _FLD_ASP_BIDP_START=12, _FLD_ASP_ASKRSQN_START=22, _FLD_ASP_BIDRSQN_START=32
+_FLD_ASP_SYMBOL     = 0
+_FLD_ASP_TIME       = 1
+_FLD_ASP_ASKP_START    = 2    # ASKP1  — best ask (lowest price), 5 consecutive
+_FLD_ASP_BIDP_START    = 7    # BIDP1  — best bid (highest price), 5 consecutive
+_FLD_ASP_ASKRSQN_START = 12   # ASKP_RSQN1, 5 consecutive
+_FLD_ASP_BIDRSQN_START = 17   # BIDP_RSQN1, 5 consecutive
+_H0STASP0_MIN_FIELDS   = 22   # fields[0..21] must be present
+_ASP_DEPTH             = 5    # levels to parse
 
 _KST = timezone(timedelta(hours=9))
 
@@ -497,13 +510,14 @@ class KisClient:
             },
         })
 
-    async def stream_ticks(self) -> AsyncIterator[Tick]:
-        """Async iterator over live tick executions (H0STCNT0 only).
+    async def stream_ticks(self) -> AsyncIterator[Tick | Quote]:
+        """Async iterator over live ticks and order-book snapshots.
 
         Routes incoming WS frames by shape:
             • JSON (`{...}`) with tr_id=PINGPONG    → echo back, continue
             • JSON subscribe ACK / error envelopes  → log, continue
             • `0|H0STCNT0|<count>|<csv>`             → parse, yield each Tick
+            • `0|H0STASP0|1|<csv>`                   → parse, yield Quote
             • `1|...` (encrypted)                    → log warn, skip
             • Anything else                          → log warn, skip
 
@@ -529,8 +543,14 @@ class KisClient:
                     continue
 
                 if raw.startswith("0|"):
-                    for tick in self._parse_h0stcnt0_frame(raw):
-                        yield tick
+                    # Peek at tr_id to route H0STASP0 frames separately.
+                    parts = raw.split("|", 3)
+                    if len(parts) >= 2 and parts[1] == TR_ID_QUOTE:
+                        for quote in self._parse_h0stasp0_frame(raw):
+                            yield quote
+                    else:
+                        for tick in self._parse_h0stcnt0_frame(raw):
+                            yield tick
                     continue
 
                 if raw.startswith("1|"):
@@ -661,6 +681,75 @@ class KisClient:
             if tick is not None:
                 ticks.append(tick)
         return ticks
+
+    def _parse_h0stasp0_frame(self, frame: str) -> list[Quote]:
+        """Split `0|H0STASP0|1|<csv>` into a list[Quote] (len ≤ 1).
+
+        Parsing failures log a warning and return [] — never raises, never
+        breaks the stream. Call once per raw frame; each frame is one snapshot.
+        """
+        try:
+            _flag, tr_id, _count_str, payload = frame.split("|", 3)
+        except ValueError:
+            logger.warning(
+                "kis.parse.h0stasp0.bad_envelope",
+                extra={"event": "kis_parse_asp_bad_envelope", "preview": frame[:80]},
+            )
+            return []
+
+        fields = payload.split("^")
+        if len(fields) < _H0STASP0_MIN_FIELDS:
+            logger.warning(
+                "kis.parse.h0stasp0.short_payload",
+                extra={
+                    "event": "kis_parse_asp_short_payload",
+                    "got":   len(fields),
+                    "need":  _H0STASP0_MIN_FIELDS,
+                },
+            )
+            return []
+
+        try:
+            symbol = fields[_FLD_ASP_SYMBOL].strip()
+            hms    = fields[_FLD_ASP_TIME].strip()
+
+            asks = []
+            bids = []
+            for i in range(_ASP_DEPTH):
+                ask_price  = int(fields[_FLD_ASP_ASKP_START    + i].strip() or "0")
+                bid_price  = int(fields[_FLD_ASP_BIDP_START    + i].strip() or "0")
+                ask_volume = int(fields[_FLD_ASP_ASKRSQN_START + i].strip() or "0")
+                bid_volume = int(fields[_FLD_ASP_BIDRSQN_START + i].strip() or "0")
+                if ask_price > 0:
+                    asks.append(QuoteLevel(price=ask_price, volume=ask_volume))
+                if bid_price > 0:
+                    bids.append(QuoteLevel(price=bid_price, volume=bid_volume))
+
+        except (IndexError, ValueError) as exc:
+            logger.warning(
+                "kis.parse.h0stasp0.bad_fields",
+                extra={"event": "kis_parse_asp_bad_fields", "error": str(exc)},
+            )
+            return []
+
+        if not symbol or not asks or not bids:
+            logger.warning(
+                "kis.parse.h0stasp0.empty_levels",
+                extra={"event": "kis_parse_asp_empty_levels", "symbol": symbol},
+            )
+            return []
+
+        # Anchor to today in KST (same as H0STCNT0). KRX market hours 09-15 KST.
+        try:
+            now_kst = datetime.now(_KST)
+            hour    = int(hms[0:2])
+            minute  = int(hms[2:4])
+            second  = int(hms[4:6])
+            ts = now_kst.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        except (ValueError, IndexError):
+            ts = datetime.now(_KST)
+
+        return [Quote(symbol=symbol, ts=ts, bids=bids, asks=asks)]
 
     @staticmethod
     def _record_to_tick(record: list[str]) -> Tick | None:

@@ -749,3 +749,83 @@ async def test_stream_ticks_handles_connection_closed_gracefully():
     client = await _connected_client_with_ws(ws)
     ticks = [t async for t in client.stream_ticks()]
     assert len(ticks) == 1  # the one before the close
+
+
+# ════════════════════════════════════════════════════════════════════════
+#              Sprint 5d — H0STASP0 parser + stream_ticks routing
+# ════════════════════════════════════════════════════════════════════════
+
+
+def _make_settings_for_client() -> Any:
+    s = MagicMock()
+    s.kis_app_key = "TEST_KEY_AAAAAAA"
+    s.kis_app_secret = "TEST_SECRET_BBBBBBB"
+    s.kis_env = "paper"
+    s.kis_account_number = "12345678-01"
+    return s
+
+
+def test_parse_h0stasp0_frame_basic():
+    """Sample H0STASP0 frame → Quote with correct 5 bid/ask levels."""
+    from src.infrastructure.kis_client import KisClient
+    from src.domain.market.models import Quote
+    client = KisClient(_make_settings_for_client())
+    # Field layout per KIS H0STASP0 spec (22 fields minimum):
+    #   [0]=symbol, [1]=time,
+    #   [2-6]=ASKP1-5 (best ask first), [7-11]=BIDP1-5 (best bid first),
+    #   [12-16]=ASKP_RSQN1-5, [17-21]=BIDP_RSQN1-5
+    fields = ["005930", "094523",
+              "72000", "72100", "72200", "72300", "72400",   # asks [2-6] — best ask first
+              "71900", "71800", "71700", "71600", "71500",   # bids [7-11] — best bid first
+              "3241",  "8102",  "12440", "18900", "21300",   # ask vols [12-16]
+              "15600", "9800",  "5200",  "2100",  "1500",    # bid vols [17-21]
+              ]
+    frame = "0|H0STASP0|1|" + "^".join(fields)
+    result = client._parse_h0stasp0_frame(frame)
+    assert len(result) == 1
+    q = result[0]
+    assert isinstance(q, Quote)
+    assert q.symbol == "005930"
+    assert len(q.asks) == 5
+    assert len(q.bids) == 5
+    assert q.asks[0].price == 72000   # best ask
+    assert q.asks[0].volume == 3241
+    assert q.bids[0].price == 71900   # best bid
+    assert q.bids[0].volume == 15600
+
+
+def test_parse_h0stasp0_frame_bad_envelope_returns_empty():
+    from src.infrastructure.kis_client import KisClient
+    client = KisClient(_make_settings_for_client())
+    assert client._parse_h0stasp0_frame("not|a|valid") == []
+    assert client._parse_h0stasp0_frame("0|H0STASP0|bad|data") == []
+
+
+def test_parse_h0stasp0_frame_short_payload_returns_empty():
+    from src.infrastructure.kis_client import KisClient
+    client = KisClient(_make_settings_for_client())
+    # Only 5 fields — not enough for 22 minimum
+    frame = "0|H0STASP0|1|005930^094523^72000^72100^72200"
+    assert client._parse_h0stasp0_frame(frame) == []
+
+
+async def test_stream_ticks_yields_quote_for_h0stasp0_frame():
+    """stream_ticks() must yield Quote objects for H0STASP0 frames."""
+    from src.infrastructure.kis_client import KisClient
+    from src.domain.market.models import Quote
+
+    # Field layout matches _FLD_ASP_* constants (22 fields, no blank filler):
+    #   [0]=symbol, [1]=time, [2-6]=ASKP1-5, [7-11]=BIDP1-5,
+    #   [12-16]=ASKRSQN1-5, [17-21]=BIDRSQN1-5
+    fields = ["005930", "094523",
+              "72000", "72100", "72200", "72300", "72400",
+              "71900", "71800", "71700", "71600", "71500",
+              "3241",  "8102",  "12440", "18900", "21300",
+              "15600", "9800",  "5200",  "2100",  "1500"]
+    frame = "0|H0STASP0|1|" + "^".join(fields)
+
+    ws = _ScriptedWebSocket([frame])
+    client = await _connected_client_with_ws(ws)
+    items = [item async for item in client.stream_ticks()]
+    assert len(items) == 1
+    assert isinstance(items[0], Quote)
