@@ -104,7 +104,7 @@ SAMPLE_KIS_RESPONSE = {
 @pytest.mark.asyncio
 async def test_fetch_balance_parses_holdings():
     from src.infrastructure.kis_balance_client import KisBalanceClient
-    from src.infrastructure.settings import Settings
+    from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.KIS_ACCOUNT_NUMBER = "12345678-01"
@@ -156,7 +156,7 @@ async def test_fetch_balance_parses_holdings():
 async def test_fetch_balance_no_token_raises():
     from src.infrastructure.kis_balance_client import KisBalanceClient
     from src.infrastructure.kis_client import KisAuthError
-    from src.infrastructure.settings import Settings
+    from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.KIS_ACCOUNT_NUMBER = "12345678-01"
@@ -175,7 +175,7 @@ async def test_fetch_balance_no_token_raises():
 async def test_fetch_balance_malformed_holding_skipped():
     """A holding with unparseable fields is skipped with a warning; others are kept."""
     from src.infrastructure.kis_balance_client import KisBalanceClient
-    from src.infrastructure.settings import Settings
+    from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.KIS_ACCOUNT_NUMBER = "12345678-01"
