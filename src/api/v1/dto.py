@@ -339,3 +339,49 @@ class QuoteDTO(BaseModel):
     ts:     str             # ISO-8601 ms
     bids:   list[QuoteLevelDTO]  # [0] = best bid
     asks:   list[QuoteLevelDTO]  # [0] = best ask
+
+
+# ── /v1/balance — KIS Account Balance ───────────────────────────────────────
+
+class HoldingDTO(BaseModel):
+    symbol:          str
+    name:            str
+    quantity:        int
+    avg_price:       float
+    current_price:   int
+    eval_amount:     int
+    profit_loss:     int
+    profit_loss_pct: float
+
+
+class BalanceSummaryDTO(BaseModel):
+    cash:            int
+    eval_total:      int
+    profit_loss:     int
+    profit_loss_pct: float
+
+
+class BalanceDTO(BaseModel):
+    summary:   BalanceSummaryDTO
+    holdings:  list[HoldingDTO]
+    ts:        str   # ISO-8601 UTC
+
+
+# ── /v1/order — Manual Order Entry ─────────────────────────────────────────
+
+class OrderRequestDTO(BaseModel):
+    symbol:     str
+    action:     Literal["buy", "sell"]
+    quantity:   int = Field(gt=0)
+    order_type: Literal["market", "limit"] = "market"
+    price:      int = Field(default=0, ge=0)
+
+
+class OrderResponseDTO(BaseModel):
+    order_id: str          # KIS 주문번호; mock 모드: "MOCK-{8자리}"
+    symbol:   str
+    action:   str          # "buy" | "sell"
+    quantity: int
+    status:   str          # "accepted" | "rejected"
+    message:  str          # KIS rt_msg1 또는 합성 메시지
+    ts:       str          # ISO-8601 UTC
