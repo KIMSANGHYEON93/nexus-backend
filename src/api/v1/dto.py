@@ -324,3 +324,18 @@ class HealthDTO(BaseModel):
     status:    str   # 항상 "ok" — liveness probe는 5xx를 반환하지 않음
     service:   str   # "nexus-backend"
     publisher: str   # "kis" | "mock" | "none"
+
+
+# ── /v1/stream WebSocket — Quote wire shape ─────────────────────────────
+
+class QuoteLevelDTO(BaseModel):
+    price:  int
+    volume: int
+
+
+class QuoteDTO(BaseModel):
+    type:   str = "quote"   # discriminator tag for BackendStreamer
+    symbol: str
+    ts:     str             # ISO-8601 ms
+    bids:   list[QuoteLevelDTO]  # [0] = best bid
+    asks:   list[QuoteLevelDTO]  # [0] = best ask

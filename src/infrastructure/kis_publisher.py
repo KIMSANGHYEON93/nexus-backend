@@ -36,9 +36,9 @@ from typing import Any
 
 import redis.asyncio as redis
 
-from ..domain.market.models import Tick
+from ..domain.market.models import Tick, Quote
 from .kis_client import KisClient, KisError
-from .redis_pubsub import CHANNEL_TICK
+from .redis_pubsub import CHANNEL_TICK, CHANNEL_QUOTE
 
 
 # Sprint 5h: optional async observer fired once per parsed tick. Wired by
@@ -188,6 +188,17 @@ def _tick_to_wire(tick: Tick) -> dict[str, Any]:
         "price":  float(tick.price),
         "volume": tick.volume,
         "side":   tick.side.value,
+    }
+
+
+def _quote_to_wire(quote: Quote) -> dict[str, Any]:
+    """Convert domain Quote → Redis-wire JSON dict with type discriminator."""
+    return {
+        "type":   "quote",
+        "symbol": quote.symbol,
+        "ts":     quote.ts.isoformat(timespec="milliseconds"),
+        "bids":   [{"price": lvl.price, "volume": lvl.volume} for lvl in quote.bids],
+        "asks":   [{"price": lvl.price, "volume": lvl.volume} for lvl in quote.asks],
     }
 
 

@@ -299,3 +299,53 @@ async def test_publisher_exposes_refresh_metrics():
     assert pub.refresh_count == 0
     assert pub.refresh_failure_count == 0
     await pub.stop()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#                  Quote DTOs and wire conversion
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_quote_dto_has_type_field():
+    from src.api.v1.dto import QuoteDTO, QuoteLevelDTO
+    dto = QuoteDTO(
+        symbol="005930",
+        ts="2026-05-18T09:45:23.000",
+        bids=[QuoteLevelDTO(price=71900, volume=15600)],
+        asks=[QuoteLevelDTO(price=72000, volume=3241)],
+    )
+    assert dto.type == "quote"
+    wire = dto.model_dump()
+    assert wire["type"] == "quote"
+    assert wire["bids"][0]["price"] == 71900
+    assert wire["asks"][0]["price"] == 72000
+
+
+def test_quote_to_wire_converts_domain_to_dict():
+    """_quote_to_wire must convert domain Quote to wire-format dict with type discriminator."""
+    from src.domain.market.models import Quote, QuoteLevel
+    from src.infrastructure.kis_publisher import _quote_to_wire
+
+    quote = Quote(
+        symbol="005930",
+        ts=datetime(2026, 5, 18, 9, 45, 23, tzinfo=timezone.utc),
+        bids=[QuoteLevel(price=71900, volume=15600), QuoteLevel(price=71850, volume=8000)],
+        asks=[QuoteLevel(price=72000, volume=3241), QuoteLevel(price=72050, volume=5500)],
+    )
+    wire = _quote_to_wire(quote)
+
+    assert wire["type"] == "quote"
+    assert wire["symbol"] == "005930"
+    assert wire["ts"] == "2026-05-18T09:45:23.000+00:00"
+    assert len(wire["bids"]) == 2
+    assert wire["bids"][0] == {"price": 71900, "volume": 15600}
+    assert wire["bids"][1] == {"price": 71850, "volume": 8000}
+    assert len(wire["asks"]) == 2
+    assert wire["asks"][0] == {"price": 72000, "volume": 3241}
+    assert wire["asks"][1] == {"price": 72050, "volume": 5500}
+
+    # Verify it serializes cleanly to JSON
+    json_str = json.dumps(wire)
+    parsed = json.loads(json_str)
+    assert parsed["type"] == "quote"
+    assert parsed["bids"][0]["price"] == 71900
