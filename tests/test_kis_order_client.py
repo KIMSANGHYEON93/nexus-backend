@@ -9,7 +9,7 @@ REST contract assuming the executor has decided to call us.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -225,3 +225,75 @@ async def test_non_json_response_raises_upstream_error():
     with patch.object(httpx.AsyncClient, "post", _fake_post):
         with pytest.raises(KisUpstreamError, match="non-JSON"):
             await client.place_order(symbol="005930", action=Action.BUY, quantity=1)
+
+
+# ── Limit-order extensions ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_place_order_limit_uses_ord_dvsn_00_and_price():
+    """Limit order must send ORD_DVSN='00' and ORD_UNPR=str(price)."""
+    settings   = _make_settings()
+    kis_client = _make_kis_client()
+    client     = KisOrderClient(settings, kis_client)
+
+    captured_body: dict = {}
+
+    async def fake_post(url, *, json, headers, **kw):
+        captured_body.update(json)
+        return _ok_response()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_inst = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_inst
+        mock_inst.post.side_effect = fake_post
+
+        result = await client.place_order(
+            symbol="005930", action=Action.BUY, quantity=10,
+            order_type="limit", price=72000,
+        )
+
+    assert captured_body["ORD_DVSN"] == "00"
+    assert captured_body["ORD_UNPR"] == "72000"
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_place_order_limit_zero_price_raises():
+    """Limit order with price=0 must raise ValueError before any HTTP call."""
+    settings   = _make_settings()
+    kis_client = _make_kis_client()
+    client     = KisOrderClient(settings, kis_client)
+
+    with pytest.raises(ValueError, match="price > 0"):
+        await client.place_order(
+            symbol="005930", action=Action.BUY, quantity=10,
+            order_type="limit", price=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_place_order_market_still_uses_ord_dvsn_01():
+    """Default market order must still send ORD_DVSN='01' and ORD_UNPR='0'."""
+    settings   = _make_settings()
+    kis_client = _make_kis_client()
+    client     = KisOrderClient(settings, kis_client)
+
+    captured_body: dict = {}
+
+    async def fake_post(url, *, json, headers, **kw):
+        captured_body.update(json)
+        return _ok_response()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_inst = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_inst
+        mock_inst.post.side_effect = fake_post
+
+        await client.place_order(
+            symbol="005930", action=Action.BUY, quantity=10,
+            # order_type defaults to "market"
+        )
+
+    assert captured_body["ORD_DVSN"] == "01"
+    assert captured_body["ORD_UNPR"] == "0"

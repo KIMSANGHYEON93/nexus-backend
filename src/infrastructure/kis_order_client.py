@@ -31,7 +31,7 @@ hot-path doesn't pay for string parsing on every call.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -94,9 +94,11 @@ class KisOrderClient:
     async def place_order(
         self,
         *,
-        symbol:   str,
-        action:   Action,
-        quantity: int,
+        symbol:     str,
+        action:     Action,
+        quantity:   int,
+        order_type: Literal["market", "limit"] = "market",
+        price:      int = 0,
     ) -> OrderResult:
         if action is Action.HOLD:
             # Defensive — executor short-circuits HOLD before reaching us,
@@ -104,6 +106,8 @@ class KisOrderClient:
             raise ValueError("place_order requires BUY or SELL, got HOLD")
         if quantity <= 0:
             raise ValueError(f"quantity must be > 0, got {quantity}")
+        if order_type == "limit" and price <= 0:
+            raise ValueError("limit order requires price > 0")
 
         token = self._kis.access_token
         if not token:
@@ -121,9 +125,9 @@ class KisOrderClient:
             "CANO":         self._cano,
             "ACNT_PRDT_CD": self._acnt_prdt_cd,
             "PDNO":         symbol,
-            "ORD_DVSN":     "01",          # 01 = 시장가 (market order)
+            "ORD_DVSN":     "01" if order_type == "market" else "00",
             "ORD_QTY":      str(quantity),
-            "ORD_UNPR":     "0",           # market order ignores unit price
+            "ORD_UNPR":     "0" if order_type == "market" else str(price),
         }
         headers = {
             "content-type":  "application/json; charset=utf-8",
