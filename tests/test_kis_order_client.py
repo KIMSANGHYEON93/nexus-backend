@@ -9,7 +9,7 @@ REST contract assuming the executor has decided to call us.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -239,15 +239,11 @@ async def test_place_order_limit_uses_ord_dvsn_00_and_price():
 
     captured_body: dict = {}
 
-    async def fake_post(url, *, json, headers, **kw):
+    async def fake_post(self, url, *, json, headers, **kw):
         captured_body.update(json)
         return _ok_response()
 
-    with patch("httpx.AsyncClient") as mock_cls:
-        mock_inst = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_inst
-        mock_inst.post.side_effect = fake_post
-
+    with patch.object(httpx.AsyncClient, "post", fake_post):
         result = await client.place_order(
             symbol="005930", action=Action.BUY, quantity=10,
             order_type="limit", price=72000,
@@ -255,6 +251,7 @@ async def test_place_order_limit_uses_ord_dvsn_00_and_price():
 
     assert captured_body["ORD_DVSN"] == "00"
     assert captured_body["ORD_UNPR"] == "72000"
+    assert captured_body["ORD_QTY"] == "10"
     assert result.success is True
 
 
@@ -281,15 +278,11 @@ async def test_place_order_market_still_uses_ord_dvsn_01():
 
     captured_body: dict = {}
 
-    async def fake_post(url, *, json, headers, **kw):
+    async def fake_post(self, url, *, json, headers, **kw):
         captured_body.update(json)
         return _ok_response()
 
-    with patch("httpx.AsyncClient") as mock_cls:
-        mock_inst = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_inst
-        mock_inst.post.side_effect = fake_post
-
+    with patch.object(httpx.AsyncClient, "post", fake_post):
         await client.place_order(
             symbol="005930", action=Action.BUY, quantity=10,
             # order_type defaults to "market"

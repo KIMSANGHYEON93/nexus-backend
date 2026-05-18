@@ -17,9 +17,8 @@ KIS tr_id matrix (paper vs live × buy vs sell):
     live  BUY  → TTTC0802U   (실전투자 현금매수)
     live  SELL → TTTC0801U   (실전투자 현금매도)
 
-Order is always 시장가 (market, ORD_DVSN="01") with ORD_UNPR="0" for
-Sprint 5g. Limit-order support is a Sprint 5h+ concern when we have a
-reason to care about price discipline beyond what the market gives us.
+Supports 시장가 (market, ORD_DVSN='01', ORD_UNPR='0') and 지정가 (limit,
+ORD_DVSN='00', ORD_UNPR=str(price)).
 
 Account number convention: KIS expects CANO (account 8 digits) and
 ACNT_PRDT_CD (product code, usually "01") as separate fields. The
