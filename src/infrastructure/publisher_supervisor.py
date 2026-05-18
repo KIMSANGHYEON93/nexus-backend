@@ -105,6 +105,13 @@ class PublisherSupervisor:
     def failover_count(self) -> int:
         return self._failover_count
 
+    @property
+    def kis_client(self) -> "KisClient | None":
+        """Expose the live KisClient for downstream consumers (e.g.
+        KisBalanceClient). Returns None when KIS is not active or has
+        failed over to MockPublisher."""
+        return self._kis_client
+
     async def start(self) -> None:
         has_kis_creds = bool(self._settings.kis_app_key and self._settings.kis_app_secret)
 

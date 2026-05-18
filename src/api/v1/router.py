@@ -14,7 +14,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request, status as http_status
 from fastapi.responses import JSONResponse
 
-from ...core.errors import PROBLEM_MEDIA_TYPE, ProblemDetail
+from ...core.errors import PROBLEM_MEDIA_TYPE, PROBLEM_TYPE_UPSTREAM, ProblemDetail
 from ...core.logging import request_id_var
 from ...core.security import Principal, get_current_user, require_principal
 from ...domain.alarms.models import Alarm, Severity, Status
@@ -41,6 +41,8 @@ from .dto import (
     AlarmStatus,
     AuditRecentDTO,
     AuditRowDTO,
+    BalanceDTO,
+    BalanceSummaryDTO,
     BlockedReasonDTO,
     BlockedReasonsDTO,
     DecisionBucketDTO,
@@ -48,6 +50,7 @@ from .dto import (
     EdgeDTO,
     EntityDTO,
     HealthDTO,
+    HoldingDTO,
     MarketTickDTO,
     MarketTickRecentDTO,
     MarketTickSnapshotDTO,
@@ -702,4 +705,87 @@ async def alarms_list(
         unacknowledged_count=unacked,
         window_since=window_since,
         server_time=server_time,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  KIS Account Balance (GET /v1/balance)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Mock-mode: when no KIS client was armed at startup (no creds, dev mode),
+# `balance_client` is None and we return a synthetic 10M KRW balance so
+# the BalancePanel HUD has data to render in dev.
+#
+# Live-mode: delegates to KisBalanceClient.fetch_balance() and maps the
+# result into BalanceDTO. KisAuthError / KisUpstreamError → 503 with the
+# spec's upstream-error problem-type URI (the panel can display a degraded
+# indicator without crashing the whole HUD).
+
+
+def _get_balance_client(request: Request):
+    """Per-request balance client accessor. Extracted as a named function
+    so integration tests can monkeypatch it without reaching into app.state."""
+    return getattr(request.app.state, "balance_client", None)
+
+
+@router.get("/balance", response_model=BalanceDTO)
+async def get_balance(request: Request) -> BalanceDTO | JSONResponse:
+    """Current KIS account balance.
+
+    Returns a synthetic 10M KRW balance when no KIS client is configured
+    (dev mode / no credentials). In live mode calls KIS inquire-balance
+    and maps the result; KIS failures yield 503 with the upstream-error
+    problem-type so the HUD can show a degraded indicator.
+    """
+    from datetime import datetime, timezone
+
+    balance_client = _get_balance_client(request)
+    if balance_client is None:
+        return BalanceDTO(
+            summary=BalanceSummaryDTO(
+                cash=10_000_000,
+                eval_total=10_000_000,
+                profit_loss=0,
+                profit_loss_pct=0.0,
+            ),
+            holdings=[],
+            ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        )
+    try:
+        result = await balance_client.fetch_balance()
+    except Exception as exc:
+        from ...infrastructure.kis_client import KisAuthError, KisUpstreamError
+        if isinstance(exc, (KisAuthError, KisUpstreamError)):
+            return JSONResponse(
+                status_code=503,
+                media_type=PROBLEM_MEDIA_TYPE,
+                content=ProblemDetail(
+                    type=PROBLEM_TYPE_UPSTREAM,
+                    title="KIS balance unavailable",
+                    detail=str(exc),
+                    status=503,
+                ).model_dump(exclude_none=True),
+            )
+        raise
+    return BalanceDTO(
+        summary=BalanceSummaryDTO(
+            cash=result.cash,
+            eval_total=result.eval_total,
+            profit_loss=result.profit_loss,
+            profit_loss_pct=result.profit_loss_pct,
+        ),
+        holdings=[
+            HoldingDTO(
+                symbol=h.symbol,
+                name=h.name,
+                quantity=h.quantity,
+                avg_price=h.avg_price,
+                current_price=h.current_price,
+                eval_amount=h.eval_amount,
+                profit_loss=h.profit_loss,
+                profit_loss_pct=h.profit_loss_pct,
+            )
+            for h in result.holdings
+        ],
+        ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
     )

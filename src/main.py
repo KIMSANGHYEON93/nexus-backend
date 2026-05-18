@@ -218,6 +218,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await supervisor.start()
     app.state.supervisor = supervisor
+    from .infrastructure.kis_balance_client import KisBalanceClient
+    app.state.balance_client = (
+        KisBalanceClient(settings, supervisor.kis_client)
+        if supervisor.kis_client is not None
+        else None
+    )
     logger.info(
         "publisher supervisor armed",
         extra={

@@ -700,3 +700,35 @@ def test_problem_envelope_minimum_fields(app_with_mocks):
     for key in ("type", "title", "status", "instance", "request_id"):
         assert key in body
     assert body["instance"] == "/v1/does-not-exist"
+
+
+# ── Balance endpoint ────────────────────────────────────────────────────────
+
+def test_get_balance_mock_mode_returns_200(app_with_mocks):
+    """Mock mode (no KIS client) returns synthetic balance as 200."""
+    app, _, _ = app_with_mocks
+    # app.state.balance_client is not set → _get_balance_client returns None → mock mode
+    response = TestClient(app).get("/v1/balance")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["cash"] == 10_000_000
+    assert body["holdings"] == []
+    assert "ts" in body
+
+
+def test_get_balance_kis_error_returns_503(app_with_mocks, monkeypatch):
+    """KIS upstream error maps to 503 UPSTREAM_ERROR."""
+    from unittest.mock import AsyncMock
+    from src.infrastructure.kis_balance_client import KisBalanceClient
+    from src.infrastructure.kis_client import KisUpstreamError
+    from src.api.v1 import router as router_module
+
+    app, _, _ = app_with_mocks
+    mock_client = AsyncMock(spec=KisBalanceClient)
+    mock_client.fetch_balance.side_effect = KisUpstreamError("KIS down")
+    monkeypatch.setattr(router_module, "_get_balance_client", lambda req: mock_client)
+
+    response = TestClient(app).get("/v1/balance")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["type"] == "https://nexus-os.local/problems/upstream-error"
