@@ -27,7 +27,7 @@ from typing import Any
 import redis.asyncio as redis
 
 from ..domain.market.models import Tick, TickSide
-from .redis_pubsub import CHANNEL_TICK
+from .redis_pubsub import CHANNEL_QUOTE, CHANNEL_TICK
 
 
 # Sprint 5h: shared TickObserver alias — same shape as KisPublisher's,
@@ -113,6 +113,7 @@ class MockPublisher:
         self._task: asyncio.Task[None] | None = None
         self._prices: dict[str, float] = dict(_BASE_PRICES)
         self._published: int = 0
+        self._quote_counter: int = 0
 
     @property
     def published_count(self) -> int:
@@ -168,6 +169,12 @@ class MockPublisher:
                             "mock publisher on_tick observer raised",
                             extra={"event": "mock_publisher_on_tick_error"},
                         )
+                # Sprint 5: publish synthetic quotes every 4 ticks.
+                self._quote_counter += 1
+                if self._quote_counter >= 4:
+                    self._quote_counter = 0
+                    quote_dict = self._next_quote(tick_dict["symbol"], tick_dict["price"])
+                    await self._client.publish(CHANNEL_QUOTE, json.dumps(quote_dict))
                 await asyncio.sleep(PUBLISH_INTERVAL_S)
         except asyncio.CancelledError:
             raise
@@ -196,4 +203,30 @@ class MockPublisher:
             "price":  round(self._prices[symbol], 2),
             "volume": random.randint(100, 10_000),
             "side":   random.choice(("buy", "sell")),
+        }
+
+    def _next_quote(self, symbol: str, mid_price: float) -> dict[str, Any]:
+        """Generate synthetic 5-level bid/ask around the current price.
+
+        Tick size: 100 KRW (valid for KRW prices > 50,000).
+        asks[0] = best ask (just above mid), asks[4] = worst ask (farthest).
+        bids[0] = best bid (just below mid), bids[4] = worst bid (farthest).
+        """
+        tick = 100
+        mid = int(mid_price)
+        now = datetime.now(timezone.utc)
+        asks = [
+            {"price": mid + tick * (i + 1), "volume": random.randint(500, 5000)}
+            for i in range(5)
+        ]
+        bids = [
+            {"price": mid - tick * (i + 1), "volume": random.randint(500, 5000)}
+            for i in range(5)
+        ]
+        return {
+            "type":   "quote",
+            "symbol": symbol,
+            "ts":     now.isoformat(timespec="milliseconds"),
+            "bids":   bids,
+            "asks":   asks,
         }

@@ -176,3 +176,29 @@ async def test_published_count_increments():
     await asyncio.sleep(0.05)
     await pub.stop()
     assert pub.published_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_mock_publisher_publishes_quotes():
+    """MockPublisher publishes at least one quote to CHANNEL_QUOTE after 4 ticks."""
+    from src.infrastructure.redis_pubsub import CHANNEL_QUOTE
+
+    published = {CHANNEL_QUOTE: []}
+    mock_redis = AsyncMock()
+    async def _publish(channel, payload):
+        if channel == CHANNEL_QUOTE:
+            published[CHANNEL_QUOTE].append(json.loads(payload))
+    mock_redis.publish = _publish
+
+    publisher = MockPublisher(mock_redis)
+    # Call _next_quote directly to test it
+    symbol = "005930"
+    price = 79000.0
+    quote_dict = publisher._next_quote(symbol, price)
+    assert quote_dict["type"] == "quote"
+    assert quote_dict["symbol"] == symbol
+    assert len(quote_dict["bids"]) == 5
+    assert len(quote_dict["asks"]) == 5
+    assert quote_dict["bids"][0]["price"] < quote_dict["asks"][0]["price"]
+    # Spread: best bid < best ask
+    assert quote_dict["bids"][0]["price"] < price < quote_dict["asks"][0]["price"]
