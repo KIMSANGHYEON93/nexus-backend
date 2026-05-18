@@ -841,6 +841,7 @@ async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDT
                 title="Invalid order parameters",
                 detail=str(exc),
                 status=422,
+                request_id=request_id_var.get(),
             ).model_dump(exclude_none=True),
         )
     except (KisAuthError, KisUpstreamError) as exc:
@@ -852,6 +853,7 @@ async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDT
                 title="KIS order unavailable",
                 detail=str(exc),
                 status=503,
+                request_id=request_id_var.get(),
             ).model_dump(exclude_none=True),
         )
 
