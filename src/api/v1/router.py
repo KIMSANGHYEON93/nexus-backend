@@ -822,7 +822,7 @@ async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDT
             ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         )
 
-    action = Action.BUY if body.action == "buy" else Action.SELL
+    action = Action(body.action)
 
     try:
         result = await order_client.place_order(
@@ -835,7 +835,13 @@ async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDT
     except ValueError as exc:
         return JSONResponse(
             status_code=422,
-            content={"detail": str(exc)},
+            media_type=PROBLEM_MEDIA_TYPE,
+            content=ProblemDetail(
+                type=PROBLEM_TYPE_UPSTREAM,
+                title="Invalid order parameters",
+                detail=str(exc),
+                status=422,
+            ).model_dump(exclude_none=True),
         )
     except (KisAuthError, KisUpstreamError) as exc:
         return JSONResponse(
