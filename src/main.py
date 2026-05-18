@@ -224,6 +224,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if supervisor.kis_client is not None
         else None
     )
+    from .infrastructure.kis_order_client import KisOrderClient
+    app.state.order_client = (
+        KisOrderClient(settings, supervisor.kis_client)
+        if supervisor.kis_client is not None
+        else None
+    )
     logger.info(
         "publisher supervisor armed",
         extra={
@@ -380,3 +386,25 @@ app.include_router(ws_router)
 @app.get("/", include_in_schema=False)
 async def root() -> dict[str, str]:
     return {"service": "nexus-backend", "docs": "/docs", "health": "/v1/health"}
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Lightweight app factory for testing — no lifespan, no DB/Redis init.
+
+    Builds the same middleware + router surface as the production `app` but
+    without the lifespan side effects (pool, Redis, supervisor, publishers).
+    `app.state.order_client` defaults to None (mock mode) so the order
+    endpoint returns synthetic responses. Tests that need a real client
+    can monkeypatch `_get_order_client` in the router module directly.
+    """
+    from .core.exception_handlers import install as _install_exc_handlers
+    from .core.middleware import RequestIdMiddleware as _RequestIdMiddleware
+
+    test_app = FastAPI(title="NEXUS OS Backend (test)", version="0.1.0")
+    test_app.add_middleware(_RequestIdMiddleware)  # type: ignore[arg-type]
+    _install_exc_handlers(test_app)
+    test_app.include_router(v1_router)
+    # Default to mock mode — no real KIS client wired.
+    test_app.state.order_client = None
+    test_app.state.balance_client = None
+    return test_app

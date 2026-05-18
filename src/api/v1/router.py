@@ -60,6 +60,8 @@ from .dto import (
     MarketVolumeBucketDTO,
     MarketVolumeWindowDTO,
     MigrationStatusDTO,
+    OrderRequestDTO,
+    OrderResponseDTO,
     ReadinessDTO,
     SnapshotDTO,
 )
@@ -785,5 +787,74 @@ async def get_balance(request: Request) -> BalanceDTO | JSONResponse:
             )
             for h in result.holdings
         ],
+        ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+    )
+
+
+# ── POST /v1/order — Manual Order Entry ─────────────────────────────────────
+#
+# Operator-initiated manual order. Bypasses the coordinator pipeline and
+# calls KisOrderClient directly. Mock mode returns a synthetic accepted
+# response so the UI can be tested without KIS credentials.
+
+
+def _get_order_client(request: Request):
+    """Named function so integration tests can monkeypatch without app.state."""
+    return getattr(request.app.state, "order_client", None)
+
+
+@router.post("/order", response_model=OrderResponseDTO, status_code=201)
+async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDTO | JSONResponse:
+    import uuid
+    from ...domain.trading.models import Action
+    from ...infrastructure.kis_client import KisAuthError, KisUpstreamError
+
+    order_client = _get_order_client(request)
+
+    if order_client is None:
+        return OrderResponseDTO(
+            order_id=f"MOCK-{uuid.uuid4().hex[:8].upper()}",
+            symbol=body.symbol,
+            action=body.action,
+            quantity=body.quantity,
+            status="accepted",
+            message="Mock mode: order accepted (no KIS credentials)",
+            ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        )
+
+    action = Action.BUY if body.action == "buy" else Action.SELL
+
+    try:
+        result = await order_client.place_order(
+            symbol=body.symbol,
+            action=action,
+            quantity=body.quantity,
+            order_type=body.order_type,
+            price=body.price,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": str(exc)},
+        )
+    except (KisAuthError, KisUpstreamError) as exc:
+        return JSONResponse(
+            status_code=503,
+            media_type=PROBLEM_MEDIA_TYPE,
+            content=ProblemDetail(
+                type=PROBLEM_TYPE_UPSTREAM,
+                title="KIS order unavailable",
+                detail=str(exc),
+                status=503,
+            ).model_dump(exclude_none=True),
+        )
+
+    return OrderResponseDTO(
+        order_id=result.order_id or f"MOCK-{uuid.uuid4().hex[:8].upper()}",
+        symbol=body.symbol,
+        action=body.action,
+        quantity=body.quantity,
+        status="accepted" if result.success else "rejected",
+        message=result.message,
         ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
     )
