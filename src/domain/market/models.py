@@ -32,15 +32,19 @@ class Tick(BaseModel):
     side: TickSide
 
 
+class QuoteLevel(BaseModel):
+    """One price level in an order book snapshot."""
+    price:  int
+    volume: int
+
+
 class Quote(BaseModel):
-    """Top-of-book snapshot — maps to KIS H0STASP0 호가 frames."""
+    """5-level order book snapshot — maps to KIS H0STASP0 호가 frames."""
 
     symbol: str
-    ts: datetime
-    bid_price: Decimal
-    bid_size: int
-    ask_price: Decimal
-    ask_size: int
+    ts:     datetime
+    bids:   list[QuoteLevel]   # [0] = best bid (highest price), len ≤ 5
+    asks:   list[QuoteLevel]   # [0] = best ask (lowest price), len ≤ 5
 
 
 class Entity(BaseModel):

@@ -477,6 +477,28 @@ from src.infrastructure.kis_client import (  # noqa: E402
 from src.domain.market.models import Tick, TickSide  # noqa: E402
 
 
+def test_quote_level_model():
+    from src.domain.market.models import QuoteLevel
+    lvl = QuoteLevel(price=72000, volume=3241)
+    assert lvl.price == 72000
+    assert lvl.volume == 3241
+
+
+def test_quote_model_has_bid_ask_lists():
+    from datetime import datetime, timezone
+    from src.domain.market.models import Quote, QuoteLevel
+    ts = datetime.now(timezone.utc)
+    q = Quote(
+        symbol="005930",
+        ts=ts,
+        bids=[QuoteLevel(price=71900, volume=15600)],
+        asks=[QuoteLevel(price=72000, volume=3241)],
+    )
+    assert q.symbol == "005930"
+    assert q.bids[0].price == 71900
+    assert q.asks[0].price == 72000
+
+
 def _make_h0stcnt0_record(
     symbol: str = "005930",
     hms: str = "130000",
