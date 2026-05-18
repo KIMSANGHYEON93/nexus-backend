@@ -737,8 +737,6 @@ async def get_balance(request: Request) -> BalanceDTO | JSONResponse:
     and maps the result; KIS failures yield 503 with the upstream-error
     problem-type so the HUD can show a degraded indicator.
     """
-    from datetime import datetime, timezone
-
     balance_client = _get_balance_client(request)
     if balance_client is None:
         return BalanceDTO(
