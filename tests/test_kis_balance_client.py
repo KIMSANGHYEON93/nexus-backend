@@ -107,30 +107,20 @@ async def test_fetch_balance_parses_holdings():
     from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
-    settings.KIS_ACCOUNT_NUMBER = "12345678-01"
-    settings.KIS_IS_PAPER = False
+    settings.kis_account_number = "12345678-01"
+    settings.kis_env = "live"
 
     kis_client = MagicMock()
     kis_client.access_token = "tok-abc"
 
     client = KisBalanceClient(settings, kis_client)
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = SAMPLE_KIS_RESPONSE
-
-    with patch.object(client, "_http", new_callable=lambda: type("C", (), {"get": AsyncMock(return_value=mock_response)})()) as mock_http:
-        # patch the _http.get call
-        pass
-
-    # Patch at the httpx level instead
     with patch("httpx.AsyncClient") as mock_async_client_cls:
         mock_async_client = AsyncMock()
         mock_async_client_cls.return_value.__aenter__.return_value = mock_async_client
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = SAMPLE_KIS_RESPONSE
-        mock_resp.raise_for_status = MagicMock()
         mock_async_client.get.return_value = mock_resp
 
         result = await client.fetch_balance()
@@ -159,8 +149,8 @@ async def test_fetch_balance_no_token_raises():
     from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
-    settings.KIS_ACCOUNT_NUMBER = "12345678-01"
-    settings.KIS_IS_PAPER = False
+    settings.kis_account_number = "12345678-01"
+    settings.kis_env = "live"
 
     kis_client = MagicMock()
     kis_client.access_token = None  # no token
@@ -178,8 +168,8 @@ async def test_fetch_balance_malformed_holding_skipped():
     from src.core.config import Settings
 
     settings = MagicMock(spec=Settings)
-    settings.KIS_ACCOUNT_NUMBER = "12345678-01"
-    settings.KIS_IS_PAPER = False
+    settings.kis_account_number = "12345678-01"
+    settings.kis_env = "live"
 
     kis_client = MagicMock()
     kis_client.access_token = "tok-abc"
@@ -206,7 +196,6 @@ async def test_fetch_balance_malformed_holding_skipped():
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = bad_response
-        mock_resp.raise_for_status = MagicMock()
         mock_async_client.get.return_value = mock_resp
 
         result = await client.fetch_balance()

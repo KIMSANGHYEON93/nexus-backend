@@ -65,22 +65,8 @@ class KisBalanceClient:
     def __init__(self, settings: Settings, kis_client: KisClient) -> None:
         self._settings = settings
         self._kis_client = kis_client
-        # Placeholder attribute so patch.object(client, "_http", ...) succeeds
-        # in tests.  The actual HTTP call always opens a fresh AsyncClient
-        # context manager inside fetch_balance() — same pattern as KisOrderClient.
-        self._http: httpx.AsyncClient | None = None
-
-        # Support both test-style uppercase attributes (KIS_ACCOUNT_NUMBER,
-        # KIS_IS_PAPER) and the real Settings fields (kis_account_number,
-        # kis_env).  MagicMock tests set the uppercase variants; production
-        # settings expose the lowercase snake_case fields.
-        account_raw = getattr(
-            settings,
-            "KIS_ACCOUNT_NUMBER",
-            None,
-        ) or getattr(settings, "kis_account_number", "")
         self._cano, self._acnt_prdt_cd = self._parse_account_number(
-            str(account_raw) if account_raw else ""
+            settings.kis_account_number
         )
 
     @staticmethod
@@ -95,15 +81,8 @@ class KisBalanceClient:
         return (raw[:8], raw[8:].lstrip("0") or "01")
 
     def _is_paper(self) -> bool:
-        """Return True when running in paper-trading mode.
-
-        Checks `KIS_IS_PAPER` first (test-mock style), then falls back to
-        `kis_env == "paper"` (real Settings style).
-        """
-        kis_is_paper = getattr(self._settings, "KIS_IS_PAPER", None)
-        if kis_is_paper is not None:
-            return bool(kis_is_paper)
-        return getattr(self._settings, "kis_env", "paper") == "paper"
+        """Return True when running in paper-trading mode."""
+        return self._settings.kis_env == "paper"
 
     def _build_url(self) -> str:
         host = (
