@@ -175,6 +175,7 @@ class MockPublisher:
                     self._quote_counter = 0
                     quote_dict = self._next_quote(tick_dict["symbol"], tick_dict["price"])
                     await self._client.publish(CHANNEL_QUOTE, json.dumps(quote_dict))
+                    self._published += 1
                 await asyncio.sleep(PUBLISH_INTERVAL_S)
         except asyncio.CancelledError:
             raise

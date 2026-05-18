@@ -9,7 +9,7 @@ responding the old shape.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -334,7 +334,7 @@ class QuoteLevelDTO(BaseModel):
 
 
 class QuoteDTO(BaseModel):
-    type:   str = "quote"   # discriminator tag for BackendStreamer
+    type:   Literal["quote"] = "quote"   # discriminator tag for BackendStreamer
     symbol: str
     ts:     str             # ISO-8601 ms
     bids:   list[QuoteLevelDTO]  # [0] = best bid

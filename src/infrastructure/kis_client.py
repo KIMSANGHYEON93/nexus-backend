@@ -745,9 +745,9 @@ class KisClient:
             hour    = int(hms[0:2])
             minute  = int(hms[2:4])
             second  = int(hms[4:6])
-            ts = now_kst.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            ts = now_kst.replace(hour=hour, minute=minute, second=second, microsecond=0).astimezone(timezone.utc)
         except (ValueError, IndexError):
-            ts = datetime.now(_KST)
+            ts = datetime.now(timezone.utc)
 
         return [Quote(symbol=symbol, ts=ts, bids=bids, asks=asks)]
 
