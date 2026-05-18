@@ -349,3 +349,44 @@ def test_quote_to_wire_converts_domain_to_dict():
     parsed = json.loads(json_str)
     assert parsed["type"] == "quote"
     assert parsed["bids"][0]["price"] == 71900
+
+
+@pytest.mark.asyncio
+async def test_kis_publisher_publishes_quote_to_channel(monkeypatch):
+    """KisPublisher._run() publishes Quote objects to CHANNEL_QUOTE."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock
+    from src.infrastructure.kis_publisher import KisPublisher
+    from src.domain.market.models import Quote, QuoteLevel
+    from src.infrastructure.redis_pubsub import CHANNEL_QUOTE
+
+    quote = Quote(
+        symbol="005930",
+        ts=datetime.now(timezone.utc),
+        bids=[QuoteLevel(price=71900, volume=15600)],
+        asks=[QuoteLevel(price=72000, volume=3241)],
+    )
+
+    mock_kis = AsyncMock()
+    mock_kis.subscribe = AsyncMock()
+
+    # stream_ticks yields one Quote then stops
+    async def _gen():
+        yield quote
+    mock_kis.stream_ticks = MagicMock(return_value=_gen())
+
+    published = {}
+    mock_redis = AsyncMock()
+    async def _publish(channel, payload):
+        published[channel] = payload
+    mock_redis.publish = _publish
+
+    publisher = KisPublisher(mock_redis, mock_kis, ["005930"])
+    await publisher._run()
+
+    assert CHANNEL_QUOTE in published
+    import json
+    data = json.loads(published[CHANNEL_QUOTE])
+    assert data["type"] == "quote"
+    assert data["symbol"] == "005930"
+    assert data["asks"][0]["price"] == 72000

@@ -37,7 +37,7 @@ from typing import Any
 import redis.asyncio as redis
 
 from ..domain.market.models import Tick, Quote
-from .kis_client import KisClient, KisError
+from .kis_client import KisClient, KisError, TR_ID_QUOTE
 from .redis_pubsub import CHANNEL_TICK, CHANNEL_QUOTE
 
 
@@ -293,29 +293,27 @@ class KisPublisher:
 
     async def _run(self) -> None:
         try:
-            await self._kis.subscribe(self._symbols)
-            async for tick in self._kis.stream_ticks():
-                payload = json.dumps(_tick_to_wire(tick))
-                await self._client.publish(CHANNEL_TICK, payload)
-                self._published += 1
-                # Sprint 5h: notify the trading pipeline observer (if wired).
-                # Errors inside the observer are swallowed so a misbehaving
-                # agent or guard never breaks the upstream tick stream —
-                # the pipeline has its own internal exception logging.
-                if self._on_tick is not None:
-                    try:
-                        await self._on_tick(tick)
-                    except Exception:
-                        logger.exception(
-                            "kis publisher on_tick observer raised",
-                            extra={"event": "kis_publisher_on_tick_error"},
-                        )
+            await self._kis.subscribe(self._symbols)                        # H0STCNT0
+            await self._kis.subscribe(self._symbols, tr_id=TR_ID_QUOTE)    # H0STASP0
+            async for item in self._kis.stream_ticks():
+                if isinstance(item, Tick):
+                    payload = json.dumps(_tick_to_wire(item))
+                    await self._client.publish(CHANNEL_TICK, payload)
+                    self._published += 1
+                    if self._on_tick is not None:
+                        try:
+                            await self._on_tick(item)
+                        except Exception:
+                            logger.exception(
+                                "kis publisher on_tick observer raised",
+                                extra={"event": "kis_publisher_on_tick_error"},
+                            )
+                elif isinstance(item, Quote):
+                    payload = json.dumps(_quote_to_wire(item))
+                    await self._client.publish(CHANNEL_QUOTE, payload)
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Surface the failure with full traceback while keeping the
-            # structured event for log routing — matches MockPublisher's
-            # crash semantics so ops dashboards don't need a special case.
             logger.exception(
                 "kis publisher loop crashed",
                 extra={"event": "kis_publisher_error"},
