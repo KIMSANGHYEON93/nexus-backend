@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from src.api.v1.router import router as v1_router
 from src.core.exception_handlers import install as install_exception_handlers
 from src.core.middleware import RequestIdMiddleware
+from src.infrastructure.database import EXPECTED_SCHEMA_VERSION
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ from src.core.middleware import RequestIdMiddleware
 # ──────────────────────────────────────────────────────────────────────────
 
 def _build_mock_pool(
-    schema_version: int | None = 1,
+    schema_version: int | None = EXPECTED_SCHEMA_VERSION,
     entities: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
     audit_rows: list[dict[str, Any]] | None = None,
@@ -179,7 +180,7 @@ def test_readyz_all_green(app_with_mocks):
     assert body["database"] is True
     assert body["redis"] is True
     assert body["migration"]["ok"] is True
-    assert body["migration"]["applied"] == 1
+    assert body["migration"]["applied"] == EXPECTED_SCHEMA_VERSION
 
 
 def test_readyz_db_down(env_minimal, monkeypatch):

@@ -15,10 +15,22 @@ from pydantic import BaseModel, Field
 
 
 class EntityDTO(BaseModel):
-    id: str
-    cluster: str
-    anomaly: float = Field(ge=0.0, le=1.0)
-    tx_vol: float
+    """Canvas entity row — snapshot bootstrap shape.
+
+    `display_name` / `ticker` / `sector` are Sprint 5s optional adds:
+    populated when the entity id matches a `security_master.ticker`, null
+    for non-security ontology nodes (sector aggregators etc.). Existing
+    clients (pre-5s frontend) ignore the new fields by Pydantic default.
+    """
+
+    id:           str
+    cluster:      str
+    anomaly:      float            = Field(ge=0.0, le=1.0)
+    tx_vol:       float
+    # ── 5s enrichment (optional, snake_case wire) ──────────────────────
+    display_name: Optional[str]    = None
+    ticker:       Optional[str]    = None
+    sector:       Optional[str]    = None
 
 
 class EdgeDTO(BaseModel):
@@ -285,7 +297,13 @@ class AlarmDTO(BaseModel):
     """One row in the alarm panel — snake_case fields direct from the
     domain model. The HUD reads every field by name; the only thing the
     router does is cast enums to their `.value` and pass timestamps
-    through Pydantic's default ISO-8601 serializer."""
+    through Pydantic's default ISO-8601 serializer.
+
+    `entity_display` is the Sprint 5s securities-enrichment add: when
+    `entity_id` matches a `security_master.ticker`, the router fills it
+    with the security's `display_name` so the alarm panel can render
+    "삼성전자 · 005930" without a separate join. Null for non-security
+    entities (the panel falls back to `entity_id` only)."""
 
     id:               str
     severity:         AlarmSeverity
@@ -296,6 +314,8 @@ class AlarmDTO(BaseModel):
     message:          str
     occurred_at:      datetime
     entity_id:        Optional[str]                = None
+    # Sprint 5s — populated only when entity_id is a known ticker.
+    entity_display:   Optional[str]                = None
     acknowledged_at:  Optional[datetime]           = None
     resolved_at:      Optional[datetime]           = None
     metadata:         Optional[dict[str, Any]]     = None
@@ -385,3 +405,96 @@ class OrderResponseDTO(BaseModel):
     status:   str          # "accepted" | "rejected"
     message:  str          # KIS rt_msg1 또는 합성 메시지
     ts:       str          # ISO-8601 UTC
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Securities ontology — Sprint 5s (GET /v1/securities, /v1/securities/...)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Wire shapes for the securities master + relations endpoints. All fields
+# snake_case (v1 convention); enums serialize as their `.value`. The DTOs
+# mirror `src/domain/securities/models.py` 1:1 except for `display_name`,
+# which is computed by the domain `Security.display_name` property and
+# materialized into the response by the router. The frontend mirrors these
+# in `repo/src/types/api.ts`.
+
+
+class SecurityMarket(str, Enum):
+    """Trading venue on the wire — must match
+    `src.domain.securities.models.Market` 1:1."""
+
+    KRX    = "KRX"
+    KOSDAQ = "KOSDAQ"
+    NASDAQ = "NASDAQ"
+    NYSE   = "NYSE"
+    OTHER  = "OTHER"
+
+
+class SecurityRelationKind(str, Enum):
+    """Relation kind on the wire — must match
+    `src.domain.securities.models.RelationKind` 1:1."""
+
+    SECTOR        = "sector"
+    CORRELATION   = "correlation"
+    SAME_CHAEBOL  = "same_chaebol"
+    SUPPLY_CHAIN  = "supply_chain"
+    CROSS_LISTING = "cross_listing"
+
+
+class SecurityDTO(BaseModel):
+    """One row from `security_master` enriched with `display_name`.
+
+    Field order (and snake_case naming) mirrors the spec §2 table so the
+    OpenAPI doc reads top-to-bottom in the same order the operator sees
+    in the property HUD. `last_price` / `change_pct` are null on the
+    master-only path; the frontend pulls live values from the existing
+    `/v1/ticks/snapshot` surface and joins client-side.
+    """
+
+    ticker:             str
+    display_name:       str
+    name_ko:            Optional[str]   = None
+    name_en:            Optional[str]   = None
+    aliases:            list[str]       = Field(default_factory=list)
+    market:             SecurityMarket
+    sector:             str
+    sector_label:       str
+    currency:           str
+    shares_outstanding: Optional[int]   = None
+    market_cap:         Optional[float] = None
+    last_price:         Optional[float] = None
+    change_pct:         Optional[float] = None
+    anomaly:            float           = Field(default=0.0, ge=0.0, le=1.0)
+    tx_vol:             float           = 0.0
+    is_subscribed:      bool
+    data_source:        str
+    updated_at:         datetime
+
+
+class SecurityListDTO(BaseModel):
+    """Response envelope for `GET /v1/securities`.
+
+    `total` is the unfiltered universe size in the same filter scope; the
+    HUD uses it for the "SHOWING N OF total" footer. `server_time` lets
+    the frontend correct for clock skew on the "updated {age} ago" labels.
+    """
+
+    items:       list[SecurityDTO]
+    total:       int
+    server_time: datetime
+
+
+class SecurityRelationDTO(BaseModel):
+    """One edge in the securities graph — snake_case on the wire.
+
+    `to_ticker` may carry the `SECTOR:` synthetic-node namespace prefix
+    (e.g. `"SECTOR:SEMI"`) — the frontend materialises those as virtual
+    hub nodes on first sighting.
+    """
+
+    from_ticker: str
+    to_ticker:   str
+    kind:        SecurityRelationKind
+    weight:      float           = Field(ge=0.0, le=1.0)
+    directed:    bool
+    evidence:    Optional[str]   = None

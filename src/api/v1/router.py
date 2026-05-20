@@ -14,7 +14,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request, status as http_status
 from fastapi.responses import JSONResponse
 
-from ...core.errors import PROBLEM_MEDIA_TYPE, PROBLEM_TYPE_UPSTREAM, ProblemDetail
+from ...core.errors import PROBLEM_MEDIA_TYPE, PROBLEM_TYPE_UPSTREAM, PROBLEM_TYPE_VALIDATION, ProblemDetail
 from ...core.logging import request_id_var
 from ...core.security import Principal, get_current_user, require_principal
 from ...domain.alarms.models import Alarm, Severity, Status
@@ -34,6 +34,7 @@ from ...infrastructure.database import (
 )
 from ...infrastructure.execution_repository import ExecutionRepository
 from ...infrastructure.redis_pubsub import get_client
+from ...infrastructure.securities_repo import SecuritiesRepository
 from .dto import (
     AlarmDTO,
     AlarmListDTO,
@@ -63,6 +64,11 @@ from .dto import (
     OrderRequestDTO,
     OrderResponseDTO,
     ReadinessDTO,
+    SecurityDTO,
+    SecurityListDTO,
+    SecurityMarket,
+    SecurityRelationDTO,
+    SecurityRelationKind,
     SnapshotDTO,
 )
 
@@ -80,6 +86,47 @@ def _repo() -> MarketRepository:
 def _audit_repo() -> ExecutionRepository:
     """Per-request audit repository factory. Same pool, distinct table."""
     return ExecutionRepository(get_pool())
+
+
+class _NullSecuritiesRepo:
+    """Stand-in returned when the asyncpg pool has not been initialized
+    (e.g. unit tests that mount the router without touching `init_pool`).
+
+    Every read returns the empty result — the calling route degrades into
+    a non-enriched response rather than 500-ing on a fresh test app. The
+    integration tests that exercise enrichment explicitly install a pool
+    mock so they exercise the real `SecuritiesRepository`."""
+
+    async def list_securities(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def count_securities(self, *args: Any, **kwargs: Any) -> int:
+        return 0
+
+    async def get_security(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def get_by_ticker_batch(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    async def list_relations(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def count_relations(self, *args: Any, **kwargs: Any) -> int:
+        return 0
+
+
+def _securities_repo() -> SecuritiesRepository | _NullSecuritiesRepo:
+    """Per-request securities repository factory. Same process-wide pool.
+
+    Falls back to `_NullSecuritiesRepo` when the asyncpg pool hasn't been
+    initialized — keeps the existing alarm-API tests (which don't mount
+    a DB pool) working while the snapshot/alarms enrichment quietly
+    degrades to "no enrichment" instead of raising 500."""
+    try:
+        return SecuritiesRepository(get_pool())
+    except RuntimeError:
+        return _NullSecuritiesRepo()
 
 
 # ── Alarm repository — process-wide in-memory backend (Sprint 5r) ───────
@@ -195,6 +242,7 @@ async def me(
 @router.get("/snapshot", response_model=SnapshotDTO)
 async def latest_snapshot(
     repo: Annotated[MarketRepository, Depends(_repo)],
+    sec_repo: Annotated[SecuritiesRepository, Depends(_securities_repo)],
     principal: Annotated[Principal, Depends(get_current_user)],
 ) -> SnapshotDTO:
     """Bootstrap dataset for the canvas — the most recent live frame.
@@ -203,15 +251,37 @@ async def latest_snapshot(
     the edge table. Field shapes mirror the frontend `NexusEntity` /
     `NexusEdge` contracts so no client-side adapter is needed.
 
+    Sprint 5s enrichment: when an entity id matches a `security_master.ticker`
+    the response carries `display_name` / `ticker` / `sector` so the canvas
+    can render the operator's local label without a second round-trip.
+    Non-security ontology nodes (sector aggregators, hubs) keep the new
+    fields at null — existing clients pre-5s simply ignore them.
+
     Protected: requires a verified Entra ID bearer token (or a dev-bypass
     when Entra is not configured and APP_ENV=development).
     """
     logger.debug("snapshot served to %s (tenant=%s)", principal.subject, principal.tenant)
     entities = await repo.list_entities()
     edges_raw = await repo.list_edges()
+
+    # ── Securities enrichment (Sprint 5s) ──────────────────────────────
+    # One batched lookup against security_master so we do NOT issue one
+    # SELECT per entity. Missing tickers simply absent from the dict and
+    # the EntityDTO ends up with display_name/ticker/sector = null.
+    ticker_ids = [e.id for e in entities]
+    sec_map = await sec_repo.get_by_ticker_batch(ticker_ids)
+
     return SnapshotDTO(
         entities=[
-            EntityDTO(id=e.id, cluster=e.cluster, anomaly=e.anomaly, tx_vol=e.tx_vol)
+            EntityDTO(
+                id=e.id,
+                cluster=e.cluster,
+                anomaly=e.anomaly,
+                tx_vol=e.tx_vol,
+                display_name=(sec_map[e.id].display_name if e.id in sec_map else None),
+                ticker=(sec_map[e.id].ticker if e.id in sec_map else None),
+                sector=(sec_map[e.id].sector if e.id in sec_map else None),
+            )
             for e in entities
         ],
         edges=[
@@ -220,6 +290,248 @@ async def latest_snapshot(
         ],
         ts=datetime.now(timezone.utc),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Securities ontology (Sprint 5s) — GET /v1/securities, ./relations, ./{ticker}
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Route registration order is load-bearing: `/relations` MUST be declared
+# before `/{ticker}` or FastAPI's dynamic-segment matcher swallows
+# "relations" as a ticker value. The pure-list `/v1/securities` route is
+# first because it's the canvas bootstrap; `/relations` second; the
+# single-ticker getter last.
+
+_SECURITY_NOT_FOUND_TYPE  = "urn:nexus:errors:security-not-found"
+_SECURITY_NOT_FOUND_TITLE = "Security not found"
+
+_VALID_MARKETS = frozenset({"KRX", "KOSDAQ", "NASDAQ", "NYSE", "OTHER"})
+_VALID_KINDS   = frozenset({
+    "sector", "correlation", "same_chaebol", "supply_chain", "cross_listing",
+})
+
+
+def _parse_markets(raw: str | None) -> list[str] | None:
+    """CSV → list[str] of validated `Market` enum values.
+
+    Unknown tokens raise `_InvalidInput` rendered as 400 with the spec's
+    `invalid-input` problem-type. We reuse the existing parser scaffolding
+    (defined for the alarms router) rather than rebuilding it.
+    """
+    tokens = _parse_csv(raw, max_items=10)
+    if tokens is None:
+        return None
+    for tok in tokens:
+        if tok not in _VALID_MARKETS:
+            raise _InvalidInput(
+                f"market {tok!r} is not one of "
+                f"{'|'.join(sorted(_VALID_MARKETS))}"
+            )
+    return tokens
+
+
+def _parse_sectors(raw: str | None) -> list[str] | None:
+    """CSV → list[str]. Sector ids are free-form internal strings (per
+    spec §2 — up to 32 chars per token, max 20 tokens) so we only enforce
+    the bounds; an unknown sector simply returns an empty result set.
+    """
+    tokens = _parse_csv(raw, max_items=20)
+    if tokens is None:
+        return None
+    for tok in tokens:
+        if len(tok) > 32:
+            raise _InvalidInput(
+                f"sector token length {len(tok)} > 32 ({tok!r})"
+            )
+    return tokens
+
+
+def _parse_relation_kinds(raw: str | None) -> list[str] | None:
+    """CSV → list[str] of validated `RelationKind` values."""
+    tokens = _parse_csv(raw, max_items=10)
+    if tokens is None:
+        return None
+    for tok in tokens:
+        if tok not in _VALID_KINDS:
+            raise _InvalidInput(
+                f"kind {tok!r} is not one of "
+                f"{'|'.join(sorted(_VALID_KINDS))}"
+            )
+    return tokens
+
+
+def _security_to_dto(sec: Any) -> SecurityDTO:
+    """Domain `Security` → wire `SecurityDTO`.
+
+    `display_name` is materialised here (property → field) so the wire
+    response carries the operator-visible label without the client
+    re-computing the ko/en/ticker fallback. Enums via `.value`.
+    """
+    return SecurityDTO(
+        ticker=sec.ticker,
+        display_name=sec.display_name,
+        name_ko=sec.name_ko,
+        name_en=sec.name_en,
+        aliases=list(sec.aliases),
+        market=SecurityMarket(sec.market.value),
+        sector=sec.sector,
+        sector_label=sec.sector_label,
+        currency=sec.currency,
+        shares_outstanding=sec.shares_outstanding,
+        market_cap=sec.market_cap,
+        last_price=sec.last_price,
+        change_pct=sec.change_pct,
+        anomaly=sec.anomaly,
+        tx_vol=sec.tx_vol,
+        is_subscribed=sec.is_subscribed,
+        data_source=sec.data_source,
+        updated_at=sec.updated_at,
+    )
+
+
+def _relation_to_dto(rel: Any) -> SecurityRelationDTO:
+    """Domain `SecurityRelation` → wire `SecurityRelationDTO`."""
+    return SecurityRelationDTO(
+        from_ticker=rel.from_ticker,
+        to_ticker=rel.to_ticker,
+        kind=SecurityRelationKind(rel.kind.value),
+        weight=rel.weight,
+        directed=rel.directed,
+        evidence=rel.evidence,
+    )
+
+
+@router.get("/securities", response_model=SecurityListDTO)
+async def securities_list(
+    request: Request,
+    sec_repo: Annotated[SecuritiesRepository, Depends(_securities_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    market: Annotated[str | None, Query(
+        description="CSV of KRX|KOSDAQ|NASDAQ|NYSE|OTHER",
+    )] = None,
+    sector: Annotated[str | None, Query(
+        description="CSV of internal sector ids (≤32 chars each, max 20)",
+    )] = None,
+    search: Annotated[str | None, Query(
+        min_length=1, max_length=64,
+        description="Ticker / name_ko / name_en / alias prefix match",
+    )] = None,
+    limit: Annotated[int, Query(
+        ge=1, le=1000,
+        description="Row cap (1..1000); default 500",
+    )] = 500,
+) -> SecurityListDTO | JSONResponse:
+    """Universe-wide securities master list — bootstrap for the canvas.
+
+    Filters (CSV-encoded, all optional):
+      • `market`  — KRX, KOSDAQ, NASDAQ, NYSE, OTHER
+      • `sector`  — internal sector ids (e.g. SEMI, FIN, AUTO)
+      • `search`  — fuzzy match across ticker / name_ko / name_en / aliases
+      • `limit`   — 1..1000
+
+    Returns the matching items, the total count under the same filters
+    (for the "SHOWING N OF total" footer), and the server's response
+    serialization time. Fault-tolerant: a repo-side failure returns an
+    empty envelope rather than 503 so the canvas paints an empty state.
+    """
+    try:
+        markets = _parse_markets(market)
+        sectors = _parse_sectors(sector)
+    except _InvalidInput as exc:
+        return _invalid_input_response(exc, instance=str(request.url.path))
+
+    logger.debug(
+        "securities served market=%s sector=%s search=%r limit=%d to %s (tenant=%s)",
+        markets or "*", sectors or "*", search, limit,
+        principal.subject, principal.tenant,
+    )
+
+    items = await sec_repo.list_securities(
+        markets=markets, sectors=sectors, search=search, limit=limit,
+    )
+    total = await sec_repo.count_securities(
+        markets=markets, sectors=sectors, search=search,
+    )
+    return SecurityListDTO(
+        items=[_security_to_dto(s) for s in items],
+        total=total,
+        server_time=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/securities/relations", response_model=list[SecurityRelationDTO])
+async def securities_relations(
+    request: Request,
+    sec_repo: Annotated[SecuritiesRepository, Depends(_securities_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+    kind: Annotated[str | None, Query(
+        description="CSV of sector|correlation|same_chaebol|supply_chain|cross_listing",
+    )] = None,
+    min_weight: Annotated[float, Query(
+        ge=0.0, le=1.0,
+        description="Drop edges with weight < this (default: 0.0)",
+    )] = 0.0,
+    tickers: Annotated[str | None, Query(
+        description="CSV of tickers; returns edges touching any of them (≤50)",
+    )] = None,
+) -> list[SecurityRelationDTO] | JSONResponse:
+    """Securities relation edges — input to the canvas force layout.
+
+    Spec §2 declares this route lives at `/v1/securities/relations`; it is
+    registered BEFORE `/v1/securities/{ticker}` so FastAPI does not match
+    "relations" as a ticker value. Returns a bare array (not envelope) per
+    spec §2 response table.
+    """
+    try:
+        kinds          = _parse_relation_kinds(kind)
+        ticker_tokens  = _parse_csv(tickers, max_items=50)
+    except _InvalidInput as exc:
+        return _invalid_input_response(exc, instance=str(request.url.path))
+
+    logger.debug(
+        "securities-relations served kind=%s min_weight=%.2f tickers=%s to %s (tenant=%s)",
+        kinds or "*", min_weight, ticker_tokens or "*",
+        principal.subject, principal.tenant,
+    )
+
+    edges = await sec_repo.list_relations(
+        kinds=kinds, min_weight=min_weight, tickers=ticker_tokens,
+    )
+    return [_relation_to_dto(e) for e in edges]
+
+
+@router.get("/securities/{ticker}", response_model=SecurityDTO)
+async def securities_detail(
+    request: Request,
+    ticker: str,
+    sec_repo: Annotated[SecuritiesRepository, Depends(_securities_repo)],
+    principal: Annotated[Principal, Depends(get_current_user)],
+) -> SecurityDTO | JSONResponse:
+    """Single-ticker detail. 404 + ProblemDetail on unknown ticker.
+
+    The 404 carries the spec's `urn:nexus:errors:security-not-found` type
+    URI so a frontend can switch on it without parsing the detail string.
+    """
+    sec = await sec_repo.get_security(ticker)
+    if sec is None:
+        problem = ProblemDetail(
+            type=_SECURITY_NOT_FOUND_TYPE,
+            title=_SECURITY_NOT_FOUND_TITLE,
+            status=http_status.HTTP_404_NOT_FOUND,
+            detail=f"ticker {ticker!r} not in universe",
+            instance=str(request.url.path),
+            request_id=request_id_var.get(),
+        )
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content=problem.model_dump(exclude_none=True),
+            media_type=PROBLEM_MEDIA_TYPE,
+        )
+    logger.debug(
+        "securities-detail served ticker=%s to %s (tenant=%s)",
+        ticker, principal.subject, principal.tenant,
+    )
+    return _security_to_dto(sec)
 
 
 @router.get("/ticks/volume", response_model=MarketVolumeWindowDTO)
@@ -585,10 +897,14 @@ def _parse_since(raw: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _alarm_to_dto(alarm: Alarm) -> AlarmDTO:
+def _alarm_to_dto(alarm: Alarm, entity_display: str | None = None) -> AlarmDTO:
     """Domain `Alarm` → wire `AlarmDTO`. Enums via `.value`, datetimes
     pass through to Pydantic's default ISO-8601 serializer. Snake-case
-    is identity on the field names (spec §3 mapping table)."""
+    is identity on the field names (spec §3 mapping table).
+
+    `entity_display` is the Sprint 5s securities-enrichment hook —
+    populated by the alarms handler when `alarm.entity_id` matches a
+    `security_master.ticker`; null otherwise."""
     return AlarmDTO(
         id=alarm.id,
         severity=AlarmSeverity(alarm.severity.value),
@@ -599,6 +915,7 @@ def _alarm_to_dto(alarm: Alarm) -> AlarmDTO:
         message=alarm.message,
         occurred_at=alarm.occurred_at,
         entity_id=alarm.entity_id,
+        entity_display=entity_display,
         acknowledged_at=alarm.acknowledged_at,
         resolved_at=alarm.resolved_at,
         metadata=alarm.metadata,
@@ -609,6 +926,7 @@ def _alarm_to_dto(alarm: Alarm) -> AlarmDTO:
 async def alarms_list(
     request: Request,
     repo: Annotated[AlarmRepository, Depends(_alarm_repo)],
+    sec_repo: Annotated[SecuritiesRepository, Depends(_securities_repo)],
     principal: Annotated[Principal, Depends(get_current_user)],
     limit: Annotated[int, Query(
         ge=LIMIT_MIN, le=LIMIT_MAX,
@@ -701,8 +1019,25 @@ async def alarms_list(
         logger.exception("alarms repo read failed; returning empty envelope")
         items, total, unacked = [], 0, 0
 
+    # ── Securities enrichment (Sprint 5s) ──────────────────────────────
+    # Batch-fetch master rows for every distinct entity_id that looks like
+    # a ticker, then map per-row. Empty dict on master-side failure so
+    # the panel still renders with bare entity_id strings.
+    ticker_ids = sorted({a.entity_id for a in items if a.entity_id})
+    sec_map = await sec_repo.get_by_ticker_batch(ticker_ids) if ticker_ids else {}
+
     return AlarmListDTO(
-        items=[_alarm_to_dto(a) for a in items],
+        items=[
+            _alarm_to_dto(
+                a,
+                entity_display=(
+                    sec_map[a.entity_id].display_name
+                    if a.entity_id and a.entity_id in sec_map
+                    else None
+                ),
+            )
+            for a in items
+        ],
         total=total,
         unacknowledged_count=unacked,
         window_since=window_since,
@@ -837,7 +1172,7 @@ async def post_order(body: OrderRequestDTO, request: Request) -> OrderResponseDT
             status_code=422,
             media_type=PROBLEM_MEDIA_TYPE,
             content=ProblemDetail(
-                type=PROBLEM_TYPE_UPSTREAM,
+                type=PROBLEM_TYPE_VALIDATION,
                 title="Invalid order parameters",
                 detail=str(exc),
                 status=422,

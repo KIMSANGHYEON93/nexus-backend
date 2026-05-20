@@ -90,4 +90,6 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Production cmd. Override with --reload in docker-compose for dev hot
 # reload; k8s never overrides this.
+# Railway overrides this CMD via railway.toml startCommand (migrate + seed + uvicorn).
+# The default here covers plain `docker run` / docker-compose without Railway.
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

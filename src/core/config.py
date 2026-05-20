@@ -114,6 +114,27 @@ class Settings(BaseSettings):
     krx_yahoo_batch_size: int = 4
     krx_yahoo_symbol_suffix: str = ".KS"
 
+    # ── Universe publisher (Sprint 5s+ — extended universe) ────────────
+    # DB-backed Yahoo Finance publisher that polls EVERY ticker in
+    # security_master that isn't already covered by KIS. With the
+    # extended universe (~900 tickers across KOSPI 200 + KOSDAQ 150 +
+    # S&P 500 + Nasdaq 100), this is what backfills tick coverage for
+    # the long tail.
+    #
+    # Default OFF — the dedicated KIS / Us / Krx-Yahoo / Extra-Yahoo
+    # publishers already cover the hand-curated 40-symbol Sprint 5s
+    # universe. Operator flips UNIVERSE_PUBLISHER_ENABLED=true on the
+    # production cluster once the extended seed is verified.
+    #
+    # Slow poll (60s) + larger batch (10) reflects the ~6× larger
+    # symbol count vs UsPublisher. Full universe rotation:
+    #   ceil(900/10) · 60s = ~90 minutes.
+    # That's fine for backend persist + canvas reference data; live
+    # trading symbols sit under KIS / Us with sub-second freshness.
+    universe_publisher_enabled: bool = False
+    universe_publisher_poll_interval_seconds: float = 60.0
+    universe_publisher_batch_size: int = 10
+
     # ── Trading execution (Sprint 5g) ──────────────────────────────────
     # GLOBAL HARD SAFETY SWITCH. Default False — the OrderExecutor will
     # only emit shadow-trade logs and NEVER call the KIS order REST API.

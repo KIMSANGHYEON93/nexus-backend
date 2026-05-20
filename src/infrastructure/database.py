@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 # Bumped in lockstep with db/migrations/NNN_*.sql additions.
-EXPECTED_SCHEMA_VERSION: int = 2
+EXPECTED_SCHEMA_VERSION: int = 3
 
 
 _pool: asyncpg.Pool | None = None

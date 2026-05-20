@@ -20,6 +20,9 @@ filterwarnings = [
     # asyncio's ProactorEventLoop on Windows logs a benign DEBUG line during
     # event-loop close in Python 3.13+; ignore it so tests don't flake on Win.
     "ignore::ResourceWarning",
+    # Python 3.14 deprecated asyncio.iscoroutinefunction; FastAPI uses it
+    # internally. Ignore until FastAPI ships a fix.
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
 ]
 
 

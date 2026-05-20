@@ -50,6 +50,7 @@ from .infrastructure.persistence_worker import PersistenceWorker
 from .infrastructure.publisher_supervisor import PublisherSupervisor
 from .infrastructure.redis_pubsub import close_client, get_client, init_client
 from .infrastructure.tick_repository import TickRepository
+from .infrastructure.universe_publisher import UniversePublisher
 from .infrastructure.us_publisher import EXTRA_YAHOO_SYMBOLS, UsPublisher
 
 
@@ -328,6 +329,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             },
         )
 
+    # ── Universe publisher (Sprint 5s+ — extended universe) ────────────
+    # DB-backed Yahoo Finance publisher for ~900-ticker universe
+    # (KOSPI 200 + KOSDAQ 150 + S&P 500 + Nasdaq 100). Reads
+    # security_master AFTER init_pool() so the pool is guaranteed
+    # available. Excludes the 12 KIS-subscribed Korean equities so KIS's
+    # dedicated WS stays the sole sub-second source for them.
+    universe_publisher: UniversePublisher | None = None
+    if settings.universe_publisher_enabled:
+        universe_publisher = UniversePublisher(
+            get_client(),
+            get_pool(),
+            exclude_tickers  = set(settings.kis_subscribe_symbol_list),
+            poll_interval_s  = settings.universe_publisher_poll_interval_seconds,
+            batch_size       = settings.universe_publisher_batch_size,
+            data_source_url  = settings.us_data_source_url,
+            on_tick          = trading_pipeline.on_tick,
+        )
+        await universe_publisher.start()
+        logger.info(
+            "universe publisher armed",
+            extra={
+                "event":       "universe_publisher_armed",
+                "universe":    universe_publisher.universe_size,
+                "batch_size":  settings.universe_publisher_batch_size,
+                "interval_s":  settings.universe_publisher_poll_interval_seconds,
+            },
+        )
+
     try:
         yield
     finally:
@@ -347,6 +376,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await extra_yahoo_publisher.stop()
         if krx_yahoo_publisher is not None:
             await krx_yahoo_publisher.stop()
+        if universe_publisher is not None:
+            await universe_publisher.stop()
         await supervisor.stop()
         await persistence_worker.stop()
         await close_client()

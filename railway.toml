@@ -1,0 +1,47 @@
+# Railway deployment — NEXUS OS Backend
+# https://docs.railway.app/reference/config-as-code
+#
+# 배포 순서:
+#   1. Railway 대시보드에서 PostgreSQL + Redis 플러그인 추가
+#   2. 아래 "필수 환경 변수" 를 Railway Variables 탭에 설정
+#   3. Deploy (빌드 → migrate → seed → uvicorn)
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# migrate → seed securities → start server (PORT는 Railway가 주입)
+startCommand = "sh -c 'python -m db.migrate && python -m db.seed_securities --apply && exec uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1'"
+healthcheckPath = "/v1/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# ── 필수 환경 변수 (Railway Variables 탭에서 설정) ──────────────────────
+#
+#  DATABASE_URL   postgresql://user:pass@host:port/db  ← PostgreSQL 플러그인이 자동 주입
+#  REDIS_URL      redis://default:pass@host:port       ← Redis 플러그인이 자동 주입
+#  APP_ENV        production
+#  CORS_ORIGINS   https://your-frontend.up.railway.app,https://your-vercel-app.vercel.app
+#
+# ── KIS 실시간 (선택) ────────────────────────────────────────────────────
+#  KIS_APP_KEY        <한국투자증권 앱키>
+#  KIS_APP_SECRET     <한국투자증권 앱시크릿>
+#  KIS_ACCOUNT_NUMBER <계좌번호>
+#  KIS_ENV            paper   (또는 live)
+#
+# ── US 주식 실시간 (선택) ────────────────────────────────────────────────
+#  US_PUBLISHER_ENABLED          true
+#  EXTRA_YAHOO_PUBLISHER_ENABLED true
+#  KRX_YAHOO_PUBLISHER_ENABLED   true
+#
+# ── 확장 유니버스 실시간 (선택, Sprint 5s+) ─────────────────────────────
+# 850종목 (KOSPI 200 + KOSDAQ 150 + S&P 500 + Nasdaq 100) 전체에 대해
+# DB 기반 Yahoo Finance 폴링을 활성화. 12 KIS 종목은 자동 제외되어
+# 중복 폴링이 없음. 기본값 false 권장 — 부하 / Yahoo rate-limit / DB 조회
+# 비용을 감수할 운영자가 직접 ON.
+#
+#  UNIVERSE_PUBLISHER_ENABLED                 true   ← 전체 유니버스 실시간 (선택)
+#  UNIVERSE_PUBLISHER_POLL_INTERVAL_SECONDS   60.0   (기본값, 선택)
+#  UNIVERSE_PUBLISHER_BATCH_SIZE              10     (기본값, 선택)
